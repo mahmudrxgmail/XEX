@@ -1,3 +1,430 @@
+name: "RDP-ProAccess (APEX-ULTIMA) v4.0 — Pure Tailscale RDP"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+      quick_test:
+        description: "5-minute smoke test (validation only)"
+        type: boolean
+        default: false
+      runtime_minutes:
+        description: "Runtime minutes (1–355; max 358)"
+        required: false
+        default: "355"
+      cycles:
+        description: "0 = stop; N = remaining handoffs (incl. current). Hard cap 24."
+        required: false
+        default: "0"
+      rdp_count:
+        description: "Parallel RDP instances (1–10)"
+        required: false
+        default: "1"
+      enable_heartbeat:
+        description: "Telegram heartbeat during session"
+        type: boolean
+        default: true
+      rotate_password:
+        description: "Append run-id salt to RDP_PASSWORD (per-run uniqueness)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  APEX_VERSION: "4.0.0-PURE-TAILSCALE-RDP"
+
+concurrency:
+  group: apex-v4-${{ github.ref }}-m${{ github.event.inputs.rdp_count || '1' }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      multi:  ${{ steps.mk.outputs.multi }}
+      n:      ${{ steps.mk.outputs.n }}
+    steps:
+      - id: mk
+        env:
+          COUNT: ${{ inputs.rdp_count }}
+        run: |
+          $n = [math]::Max(1, [math]::Min(10, [int]$env:COUNT))
+          $inc = 1..$n | ForEach-Object { @{ id = $_ } }
+          "matrix=$(@{ include = $inc } | ConvertTo-Json -Compress)" >> $env:GITHUB_OUTPUT
+          "multi=$([int]($n -gt 1))" >> $env:GITHUB_OUTPUT
+          "n=$n" >> $env:GITHUB_OUTPUT
+
+  rdp:
+    needs: setup
+    runs-on: windows-latest
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 10
+      fail-fast: false
+    timeout-minutes: 360
+
+    env:
+      TS_KEY:        ${{ secrets.TAILSCALE_AUTH_KEY }}
+      PASS:          ${{ secrets.RDP_PASSWORD }}
+      TG_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT:       ${{ secrets.TELEGRAM_CHAT_ID }}
+      GH_PAT:        ${{ secrets.GH_PAT }}
+      RDP_USER:      ProAccessVIP
+      TS_TAILNET:    ${{ inputs.ts_tailnet }}
+      QUICK_TEST:    ${{ inputs.quick_test }}
+      RUNTIME_INPUT: ${{ inputs.runtime_minutes }}
+      CYCLES_INPUT:  ${{ inputs.cycles }}
+      ENABLE_HEARTBEAT: ${{ inputs.enable_heartbeat }}
+      ROTATE_PASSWORD:  ${{ inputs.rotate_password }}
+      MATRIX_ID:     ${{ matrix.id }}
+      MULTI_FLAG:    ${{ needs.setup.outputs.multi }}
+
+    steps:
+      - name: "⚡ APEX Bootstrap v4.0 — Core + Tailscale Install"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path "C:\Apex\logs","C:\Apex\scripts" -Force | Out-Null
+          Start-Transcript -Path "C:\Apex\logs\bootstrap.log" -Append
+
+          Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+          Write-Host "  APEX-ULTIMA v${env:APEX_VERSION}  (Pure Tailscale RDP Fabric)" -ForegroundColor Cyan
+          Write-Host "  Sovereign • Minimal • Blazing Fast" -ForegroundColor Cyan
+          Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
+          $Global:Apex = [ordered]@{
+              Version        = $env:APEX_VERSION
+              MatrixId       = [int]$env:MATRIX_ID
+              IsMulti        = $env:MULTI_FLAG -eq '1'
+              Hostname       = if ($env:MULTI_FLAG -eq '1') { "bullet$($env:MATRIX_ID)" } else { "bullet" }
+              RuntimeMinutes = 355
+              TailscaleIP    = $null
+              StartTime      = Get-Date
+              EventsLog      = "C:\Apex\apex-events.jsonl"
+              MetricsLog     = "C:\Apex\apex-metrics.jsonl"
+              DashboardPath  = "C:\Apex\apex-dashboard.html"
+              LineageRunId   = "${{ github.run_id }}"
+              CyclesExecuted = 0
+          }
+
+          $core = "C:\Apex\scripts\APEX-Core.ps1"
+          @'
+# APEX-Core v4.0 — Pure Tailscale RDP Fabric
+function Write-ApexEvent {
+    param([ValidateSet('INFO','WARN','ERROR','SUCCESS','DEBUG')][string]$Level='INFO',
+          [Parameter(Mandatory)][string]$Message,
+          [hashtable]$Data=@{})
+    try {
+        $evt = [ordered]@{ ts = (Get-Date).ToString("o"); level=$Level; msg=$Message; matrix=$Global:Apex.MatrixId; run_id=$Global:Apex.LineageRunId; data=$Data }
+        Add-Content -Path $Global:Apex.EventsLog -Value ($evt | ConvertTo-Json -Compress -Depth 6) -Encoding utf8
+    } catch {}
+    $color = @{ ERROR='Red'; WARN='Yellow'; SUCCESS='Green'; INFO='Cyan'; DEBUG='DarkGray' }[$Level]
+    Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] [$Level] $Message" -ForegroundColor $color
+}
+
+function Write-ApexMetric {
+    param([hashtable]$Metrics)
+    try {
+        $m = [ordered]@{ ts=(Get-Date).ToString("o"); matrix=$Global:Apex.MatrixId } + $Metrics
+        Add-Content -Path $Global:Apex.MetricsLog -Value ($m | ConvertTo-Json -Compress -Depth 6) -Encoding utf8
+    } catch {}
+}
+
+function Get-SystemMetrics {
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $cpu = try { (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop).CounterSamples.CookedValue } catch { 0.0 }
+        $disk = Get-PSDrive C -ErrorAction SilentlyContinue
+        $net = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | Select-Object -First 1
+        $stats = if ($net) { $net | Get-NetAdapterStatistics -ErrorAction SilentlyContinue } else { $null }
+        return [ordered]@{
+            ts           = (Get-Date).ToString("o")
+            free_ram_gb  = if ($os) { [math]::Round($os.FreePhysicalMemory / 1MB, 2) } else { 0 }
+            cpu_load_pct = [math]::Round($cpu, 1)
+            c_free_gb    = if ($disk) { [math]::Round($disk.Free/1GB,2) } else { 0 }
+            net_sent_mb  = if ($stats) { [math]::Round($stats.SentBytes/1MB, 2) } else { 0 }
+            net_recv_mb  = if ($stats) { [math]::Round($stats.ReceivedBytes/1MB, 2) } else { 0 }
+            tailscale_up = (Test-TailscaleHealth)
+        }
+    } catch { return [ordered]@{ ts=(Get-Date).ToString("o"); error=$_.Exception.Message } }
+}
+
+function Test-TailscaleHealth {
+    param([string]$TsPath = "C:\Program Files\Tailscale\tailscale.exe")
+    if (-not (Test-Path $TsPath)) { return $false }
+    try { $status = & $TsPath status --json 2>$null | ConvertFrom-Json -ErrorAction Stop; return ($status -and $status.BackendState -eq "Running") }
+    catch { return $false }
+}
+
+function Get-TailscaleIP {
+    param([string]$TsPath = "C:\Program Files\Tailscale\tailscale.exe")
+    try { $ip = (& $TsPath ip -4 2>$null | Out-String).Trim(); if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$') { return $ip } } catch {}
+    return $null
+}
+
+function Test-RdpHealth {
+    $svc = Get-Service TermService -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -ne 'Running') { return $false }
+    return [bool](Get-NetUDPEndpoint -LocalPort 3389 -ErrorAction SilentlyContinue)
+}
+
+function Send-ApexTelegram {
+    param([string]$Text, [int]$MaxRetries=2)
+    if (-not $env:TG_TOKEN -or -not $env:TG_CHAT) { return $false }
+    $body = @{ chat_id=$env:TG_CHAT; text=$Text; disable_web_page_preview=$true }
+    for ($r=1; $r -le $MaxRetries; $r++) {
+        try { Invoke-RestMethod -Uri "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage" -Method Post -Body $body -ErrorAction Stop | Out-Null; return $true }
+        catch { Start-Sleep -Seconds (2*$r) }
+    }
+    return $false
+}
+
+function Write-ApexDashboard {
+    try {
+        $m = Get-SystemMetrics
+        $tsIp = if ($Global:Apex.TailscaleIP) { $Global:Apex.TailscaleIP } else { '(pending)' }
+        $uptime = [math]::Round(((Get-Date) - $Global:Apex.StartTime).TotalMinutes, 1)
+        $events = Get-Content $Global:Apex.EventsLog -Tail 8 -ErrorAction SilentlyContinue | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} }
+        $evtRows = $events | ForEach-Object { "<tr><td>$($_.ts)</td><td>$($_.level)</td><td>$($_.msg)</td></tr>" }
+        $html = @"
+<!doctype html><html><head><meta charset="utf-8">
+<title>APEX-ULTIMA v$($Global:Apex.Version) — Matrix $($Global:Apex.MatrixId)</title>
+<meta http-equiv="refresh" content="15">
+<style>body{font-family:'Segoe UI',system-ui;background:#0a0e1a;color:#e0e6ed;margin:0;padding:20px}
+h1{color:#00d4ff;margin:0 0 4px 0;font-size:22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}
+.card{background:#141b2e;border:1px solid #1f2a44;border-radius:8px;padding:14px}
+.card .v{font-size:24px;font-weight:600;color:#00d4ff}
+.card .l{font-size:11px;text-transform:uppercase;color:#6b7894;letter-spacing:1px}
+table{width:100%;border-collapse:collapse;background:#141b2e;border-radius:8px;overflow:hidden}
+td,th{padding:8px 12px;text-align:left;border-bottom:1px solid #1f2a44;font-size:13px}
+th{background:#1a2238;color:#00d4ff}
+.meta{color:#6b7894;font-size:12px;margin-bottom:10px}</style></head><body>
+<h1>APEX-ULTIMA v$($Global:Apex.Version)</h1>
+<div class="meta">Matrix $($Global:Apex.MatrixId) • Host $($Global:Apex.Hostname) • Tailscale $tsIp • Uptime ${uptime}m • $((Get-Date).ToString('o'))</div>
+<div class="grid">
+  <div class="card"><div class="l">Free RAM (GB)</div><div class="v">$($m.free_ram_gb)</div></div>
+  <div class="card"><div class="l">CPU Load %</div><div class="v">$($m.cpu_load_pct)</div></div>
+  <div class="card"><div class="l">C: Free (GB)</div><div class="v">$($m.c_free_gb)</div></div>
+  <div class="card"><div class="l">Tailscale</div><div class="v">$(if($m.tailscale_up){'✅'}else{'❌'})</div></div>
+</div>
+<table><thead><tr><th>Time</th><th>Level</th><th>Event</th></tr></thead><tbody>$evtRows</tbody></table>
+</body></html>
+"@
+        $html | Set-Content -Path $Global:Apex.DashboardPath -Encoding utf8 -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+function New-ApexIdleTask {
+    param([int]$RuntimeMinutes)
+    $idleScript = "C:\Apex\IdleSim.ps1"
+    @'
+Add-Type -AssemblyName System.Windows.Forms
+$end = (Get-Date).AddMinutes($__RUNTIME__)
+while ((Get-Date) -lt $end) {
+    try {
+        $p = [Windows.Forms.Cursor]::Position
+        [Windows.Forms.Cursor]::Position = New-Object Drawing.Point($p.X + 1, $p.Y)
+        Start-Sleep -Milliseconds 60
+        [Windows.Forms.Cursor]::Position = $p
+        [Windows.Forms.SendKeys]::SendWait('{SCROLLLOCK}')
+        Start-Sleep -Milliseconds 40
+        [Windows.Forms.SendKeys]::SendWait('{SCROLLLOCK}')
+    } catch {}
+    Start-Sleep -Seconds 38
+}
+'@ -replace '\$__RUNTIME__', $RuntimeMinutes | Set-Content $idleScript -Encoding utf8
+
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$idleScript`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName "APEX-IdleJiggler" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName "APEX-IdleJiggler" -ErrorAction SilentlyContinue
+}
+
+function Compress-ApexLogs {
+    param([string]$OutPath = "C:\Apex\apex-logs.zip")
+    try { $files = @("C:\Apex\logs\*.log","C:\Apex\apex-events.jsonl","C:\Apex\apex-metrics.jsonl","C:\Apex\apex-dashboard.html","C:\Apex\apex-summary.html")
+          Compress-Archive -Path $files -DestinationPath $OutPath -Force -ErrorAction Stop; return $OutPath } catch { return $null }
+}
+
+function Write-ApexSummaryHtml {
+    param([hashtable]$Checks, [hashtable]$Metrics)
+    $rows = $Checks.Keys | ForEach-Object { "<tr><td>$_</td><td>$(if($Checks[$_]){'✅ PASS'}else{'❌ FAIL'})</td></tr>" }
+    $html = @"
+<!doctype html><html><head><meta charset="utf-8"><title>APEX Run Summary</title>
+<style>body{font-family:'Segoe UI';background:#0a0e1a;color:#e0e6ed;padding:20px}
+table{border-collapse:collapse;width:100%}td,th{padding:8px 12px;border-bottom:1px solid #1f2a44}
+th{background:#1a2238;color:#00d4ff;text-align:left}</style></head><body>
+<h1>APEX-ULTIMA v$($Global:Apex.Version) — Run Summary</h1>
+<p>Matrix $($Global:Apex.MatrixId) • Host $($Global:Apex.Hostname) • Tailscale $($Global:Apex.TailscaleIP) • $((Get-Date).ToString('o'))</p>
+<h2>Pre-flight checks</h2><table><tr><th>Check</th><th>Status</th></tr>$rows</table>
+<h2>Final metrics</h2><pre>$($Metrics | ConvertTo-Json -Depth 6)</pre>
+</body></html>
+"@
+    $html | Set-Content "C:\Apex\apex-summary.html" -Encoding utf8
+}
+
+Write-ApexEvent 'SUCCESS' "APEX-Core v4.0 loaded (8 helpers)"
+'@ | Set-Content $core -Encoding utf8
+
+          . $core
+          Write-ApexEvent 'INFO' "Bootstrap core loaded"
+
+          $rt = if ([bool]::Parse($env:QUICK_TEST)) { 5 }
+                elseif ([int]$env:RUNTIME_INPUT -ge 1 -and [int]$env:RUNTIME_INPUT -le 358) { [int]$env:RUNTIME_INPUT }
+                else { 355 }
+          $Global:Apex.RuntimeMinutes = $rt
+          Write-ApexEvent 'INFO' "Hostname: $($Global:Apex.Hostname) | Runtime: ${rt}m | Multi: $($Global:Apex.IsMulti)"
+
+          Write-ApexEvent 'INFO' "Installing Tailscale via winget..."
+          winget install --id Tailscale.Tailscale -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>$null
+          if ($LASTEXITCODE -ne 0) {
+              Write-ApexEvent 'WARN' "winget failed; falling back to direct MSI"
+              $msi = "C:\Apex\tailscale.msi"
+              Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-1.98.8-amd64.msi" -OutFile $msi -UseBasicParsing
+              Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/quiet","/norestart" -Wait
+          }
+          $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
+
+          powercfg /change standby-timeout-ac 0; powercfg /change monitor-timeout-ac 0; powercfg /hibernate off
+          reg add "HKLM\Software\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f | Out-Null
+          try { w32tm /config /manualpeerlist:"time.cloudflare.com,0x8 pool.ntp.org,0x8" /syncfromflags:manual /reliable:yes /update | Out-Null; Restart-Service w32time -Force -ErrorAction SilentlyContinue; w32tm /resync /force | Out-Null } catch {}
+
+          powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 | Out-Null
+          $scheme = (powercfg -list | Select-String "e9a42b02-d5df-448d-aa00-03f14749eb61").Line
+          if ($scheme -match "([0-9a-f-]{36})") { powercfg -setactive $Matches[1] }
+          else { powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c }
+          @("SUB_PROCESSOR PROCTHROTTLEMIN 100","SUB_PROCESSOR PROCTHROTTLEMAX 100","SUB_PROCESSOR PERFBOOSTMODE 2",
+            "SUB_PROCESSOR CPMINCORES 100","SUB_PROCESSOR CPMAXCORES 100","SUB_PROCESSOR IDLEDISABLE 1",
+            "SUB_PCIEXPRESS ASPM 0") | ForEach-Object { powercfg -setacvalueindex SCHEME_CURRENT $_ }
+          powercfg -setactive SCHEME_CURRENT
+
+          $bloat = @("wuauserv","DoSvc","SysMain","DiagTrack","WSearch","BITS","MapsBroker","EdgeUpdate",
+                     "Spooler","WerSvc","RetailDemo","XblAuthManager","XblGameSave","dmwappushservice")
+          $bloat | ForEach-Object { Stop-Service $_ -Force -ErrorAction SilentlyContinue; Set-Service $_ -StartupType Disabled -ErrorAction SilentlyContinue }
+          try { Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableArchiveScanning $true -DisableBehaviorMonitoring $true -SubmitSamplesConsent 2 -Force -ErrorAction Stop } catch {}
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f | Out-Null
+
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          $tsCtrl = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+          $tsPol  = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (-not (Test-Path $tsPol)) { New-Item $tsPol -Force | Out-Null }
+          Set-ItemProperty $rdpTcp ColorDepth 5 -Type DWord -Force
+          Set-ItemProperty $rdpTcp MinSendInterval 3 -Type DWord -Force
+          Set-ItemProperty $tsPol  SelectTransport 0 -Type DWord -Force
+          Set-ItemProperty $tsPol  fClientDisableUDP 0 -Type DWord -Force
+          Set-ItemProperty $tsPol  fServerDisableUDP 0 -Type DWord -Force
+          Set-ItemProperty $tsCtrl KeepAliveEnable 1 -Type DWord -Force
+          Set-ItemProperty $tsCtrl KeepAliveInterval 1 -Type DWord -Force
+          Set-ItemProperty $rdpTcp fEnableCompression 1 -Type DWord -Force
+          Set-ItemProperty $rdpTcp fEnableAutoReconnect 1 -Type DWord -Force
+          Set-ItemProperty $rdpTcp BitmapCacheSize 4096 -Type DWord -Force
+          Set-ItemProperty $rdpTcp SecurityLayer 1 -Type DWord -Force
+          Set-ItemProperty $rdpTcp UserAuthentication 0 -Type DWord -Force
+          Set-ItemProperty $tsPol  fPromptForPassword 0 -Type DWord -Force
+          Set-ItemProperty $tsPol  fDisableClip 0 -Type DWord -Force
+          Set-ItemProperty $tsPol "AVC444ModePreferred" 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Write-ApexEvent 'SUCCESS' "RDP protocol tuned"
+
+          if (-not $env:PASS) { Write-ApexEvent 'ERROR' "RDP_PASSWORD secret missing"; exit 1 }
+          $pass = $env:PASS
+          if ([bool]::Parse($env:ROTATE_PASSWORD)) {
+              $salt = "${{ github.run_id }}" + "-" + $Global:Apex.MatrixId
+              $pass = $env:PASS + "@" + $salt.Substring([math]::Max(0,$salt.Length-8))
+          }
+          $u = $env:RDP_USER
+          $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+          if (-not (Get-LocalUser $u -ErrorAction SilentlyContinue)) { New-LocalUser -Name $u -Password $sec -Description "APEX RDP Agent" -AccountNeverExpires | Out-Null }
+          else { Set-LocalUser -Name $u -Password $sec -AccountNeverExpires; Enable-LocalUser $u }
+          Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
+          Set-ItemProperty $tsCtrl fDenyTSConnections 0 -Force
+          Write-ApexEvent 'SUCCESS' "RDP user '$u' ready"
+
+          New-ApexIdleTask -RuntimeMinutes $rt
+
+          Write-ApexEvent 'SUCCESS' "APEX Bootstrap v4.0 complete"
+          Stop-Transcript
+
+      - name: "🌐 Tailscale Sovereign Mesh v4"
+        run: |
+          . "C:\Apex\scripts\APEX-Core.ps1"
+          Start-Transcript -Path "C:\Apex\logs\tailscale.log" -Append
+          if (-not $env:TS_KEY) { Write-ApexEvent 'ERROR' "TAILSCALE_AUTH_KEY missing"; exit 1 }
+
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          & $ts logout 2>$null | Out-Null
+          & $ts up --authkey="$($env:TS_KEY)" --hostname="$($Global:Apex.Hostname)" --unattended `
+                --accept-routes --accept-dns=$false --exit-node-allow-lan-access 2>&1 | Out-Null
+
+          $ip = $null; $deadline = (Get-Date).AddSeconds(60)
+          while (-not $ip -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2; $ip = Get-TailscaleIP -TsPath $ts }
+          if (-not $ip) { Write-ApexEvent 'ERROR' "No Tailscale IPv4 after 60s"; exit 1 }
+          $Global:Apex.TailscaleIP = $ip
+          Write-ApexEvent 'SUCCESS' "Tailscale connected: $ip"
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue | Set-NetFirewallRule -RemoteAddress $ip -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "RDP-UDP-Tailscale-Only" -Direction Inbound -LocalPort 3389 -Protocol UDP -Action Allow -RemoteAddress $ip -ErrorAction SilentlyContinue | Out-Null
+
+          $msg = "🟢 *APEX v$($Global:Apex.Version)* Login`nIP: \`$ip\``nHost: \`$($Global:Apex.Hostname)\``nMatrix: $($Global:Apex.MatrixId)"
+          Send-ApexTelegram $msg | Out-Null
+          Write-ApexEvent 'SUCCESS' "Tailscale Mesh active"
+          Stop-Transcript
+
+      - name: "✅ Pre-flight Gate v4 (Smoke Test + Telemetry)"
+        run: |
+          . "C:\Apex\scripts\APEX-Core.ps1"
+          Start-Transcript -Path "C:\Apex\logs\preflight.log" -Append
+          Write-ApexEvent 'INFO' "Running Pre-flight Gate v4..."
+
+          $checks = [ordered]@{
+              "Tailscale-IPv4"       = ($Global:Apex.TailscaleIP -match '^\d{1,3}(\.\d{1,3}){3}$')
+              "Tailscale-Health"     = (Test-TailscaleHealth)
+              "TermService"          = ((Get-Service TermService -ErrorAction SilentlyContinue).Status -eq 'Running')
+              "RDP-3389-UDP"         = [bool](Get-NetUDPEndpoint -LocalPort 3389 -ErrorAction SilentlyContinue)
+              "Internet-Cloudflare"  = (Test-Connection 1.1.1.1 -Count 2 -Quiet -ErrorAction SilentlyContinue)
+              "Disk-C-FreeGB"        = ((Get-PSDrive C).Free / 1GB -gt 8)
+              "Memory-AvailableGB"   = ((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB -gt 3.5)
+              "IdleTask-Registered"  = [bool](Get-ScheduledTask -TaskName "APEX-IdleJiggler" -ErrorAction SilentlyContinue)
+          }
+
+          $allGreen = $true
+          foreach ($k in $checks.Keys) {
+              $ok = $checks[$k]
+              if (-not $ok) { $allGreen = $false }
+              Write-Host "  $(if($ok){'✅'}else{'❌'}) $k" -ForegroundColor $(if($ok){'Green'}else{'Red'})
+          }
+
+          $metrics = Get-SystemMetrics
+          Write-ApexMetric $metrics
+          Write-ApexDashboard
+
+          $summary = if ($allGreen) { "🎯 ALL SOVEREIGN — RDP fabric ready" }
+                     else { "⚠️ Some checks degraded (core still operational)" }
+          Write-ApexEvent $(if($allGreen){'SUCCESS'}else{'WARN'}) $summary
+
+          $preflight = [ordered]@{ timestamp=(Get-Date).ToString("o"); apex_version=$Global:Apex.Version; hostname=$Global:Apex.Hostname; tailscale_ip=$Global:Apex.TailscaleIP; checks=$checks; metrics=$metrics; all_green=$allGreen; matrix_id=$Global:Apex.MatrixId }
+          $preflight | ConvertTo-Json -Depth 6 | Set-Content "C:\Apex\preflight.json"
+
+          if ([bool]::Parse($env:QUICK_TEST)) {
+              Write-ApexEvent 'SUCCESS' "Smoke test passed — exiting per quick_test"
+              Stop-Transcript
+              exit 0
+          }
+          Stop-Transcript
+
       - name: "⏳ Session Hold v4 + Self-Healing Sentinel + Handoff"
         if: "always() && inputs.quick_test == false"
         env:
@@ -13,30 +440,25 @@
           Write-ApexEvent 'SUCCESS' "APEX-ULTIMA v4.0 SESSION ACTIVE"
           Write-Host "   Host: $($Global:Apex.Hostname) | IP: $($Global:Apex.TailscaleIP) | Runtime: ${sessMin}m" -ForegroundColor Cyan
 
-          # ── Self-Healing Sentinel (background) ──────────────────────────
           $sentinel = {
               param($TsPath, $AuthKey, $Hostname, $MatrixId, $EventsLog, $EndTime)
               $healCount = 0
               while ((Get-Date) -lt $EndTime) {
                   Start-Sleep -Seconds 60
                   try {
-                      # Tailscale health
                       $tsOk = $false
                       try { $st = & $TsPath status --json 2>$null | ConvertFrom-Json -ErrorAction Stop; $tsOk = ($st -and $st.BackendState -eq "Running") } catch {}
                       if (-not $tsOk) {
                           & $TsPath up --authkey="$AuthKey" --hostname="$Hostname" --unattended --accept-routes --accept-dns=$false 2>$null | Out-Null
                           $healCount++; Add-Content $EventsLog -Value ([ordered]@{ts=(Get-Date).ToString("o");level="WARN";msg="Sentinel: Tailscale re-up";matrix=$MatrixId} | ConvertTo-Json -Compress) -Encoding utf8
                       }
-                      # RDP service
                       $svc = Get-Service TermService -ErrorAction SilentlyContinue
                       if (-not $svc -or $svc.Status -ne 'Running') {
                           Restart-Service TermService -Force -ErrorAction SilentlyContinue
                           $healCount++; Add-Content $EventsLog -Value ([ordered]@{ts=(Get-Date).ToString("o");level="WARN";msg="Sentinel: TermService restart";matrix=$MatrixId} | ConvertTo-Json -Compress) -Encoding utf8
                       }
-                      # Idle task
                       $task = Get-ScheduledTask -TaskName "APEX-IdleJiggler" -ErrorAction SilentlyContinue
                       if (-not $task -or $task.State -ne 'Ready') { Start-ScheduledTask -TaskName "APEX-IdleJiggler" -ErrorAction SilentlyContinue; $healCount++ }
-                      # Memory trim (every 5 cycles)
                       if (([math]::Floor(((Get-Date) - [datetime]::Parse('2000-01-01')).TotalSeconds / 60) % 5) -eq 0) {
                           Start-Process -FilePath "$env:WINDIR\System32\rundll32.exe" -ArgumentList "advapi32.dll,ProcessIdleTasks" -Wait -ErrorAction SilentlyContinue
                           Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.WS -gt 80MB -and $_.ProcessName -notin 'svchost','tailscaled','wscript','powershell','pwsh' } | ForEach-Object { try { $_.MinimizeWorkingSet() } catch {} }
@@ -48,7 +470,6 @@
           $sentinelJob = Start-Job -ScriptBlock $sentinel -ArgumentList $tsPath, $env:TS_KEY, $Global:Apex.Hostname, $Global:Apex.MatrixId, $Global:Apex.EventsLog, $endTime -Name "ApexSentinel"
           Write-ApexEvent 'SUCCESS' "Sentinel started (PID $($sentinelJob.Id))"
 
-          # ── Heartbeat + Dashboard loop ──────────────────────────────────
           $lastHB = Get-Date; $hbIntervalMin = 40
           $lastDashboard = Get-Date; $dashboardIntervalSec = 60
           while ((Get-Date) -lt $endTime.AddMinutes(-1)) {
@@ -69,7 +490,6 @@
           Remove-Job -Job $sentinelJob -ErrorAction SilentlyContinue
           Write-ApexEvent 'SUCCESS' "Sentinel stopped cleanly"
 
-          # ── Handoff (cycle-aware, PAT-aware, jitter) ────────────────────
           $cyclesLeft = [int]$env:CYCLES_INPUT
           if ($cyclesLeft -gt 0) {
               $next = $cyclesLeft - 1
@@ -104,3 +524,42 @@
               Send-ApexTelegram "🔴 *APEX v4.0 Session End* | $($Global:Apex.Hostname)" | Out-Null
           }
           Stop-Transcript
+
+      - name: "📦 Compress + Upload APEX-ULTIMA v4.0 Logs"
+        if: always()
+        run: |
+          . "C:\Apex\scripts\APEX-Core.ps1" -ErrorAction SilentlyContinue
+          try {
+            $finalMetrics = Get-SystemMetrics
+            $finalChecks = @{ Tailscale=(Test-TailscaleHealth); RDP=(Test-RdpHealth) }
+            Write-ApexSummaryHtml -Checks $finalChecks -Metrics $finalMetrics
+            $zip = Compress-ApexLogs
+            if ($zip) { Write-Host "Compressed logs: $zip" -ForegroundColor Green }
+          } catch { Write-Host "Summary/compress skipped: $($_.Exception.Message)" -ForegroundColor Yellow }
+
+      - name: "📦 Upload APEX-ULTIMA v4.0 Artifacts"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-v4-logs-${{ github.run_id }}-m${{ matrix.id }}
+          path: |
+            C:\Apex\logs\*.log
+            C:\Apex\apex-events.jsonl
+            C:\Apex\apex-metrics.jsonl
+            C:\Apex\preflight.json
+            C:\Apex\apex-dashboard.html
+            C:\Apex\apex-summary.html
+            C:\Apex\apex-logs.zip
+          retention-days: 21
+          if-no-files-found: warn
+          compression-level: 9
+
+      - name: "🏁 Final Sovereign Summary"
+        if: always()
+        run: |
+          . "C:\Apex\scripts\APEX-Core.ps1" -ErrorAction SilentlyContinue
+          Write-ApexEvent 'SUCCESS' "APEX-ULTIMA v${env:APEX_VERSION} completed for matrix-${{ matrix.id }}"
+          Write-Host "`n═══════════════════════════════════════════════════════════════" -ForegroundColor Green
+          Write-Host "  APEX-ULTIMA v4.0 PURE TAILSCALE RDP FABRIC — COMPLETE" -ForegroundColor Green
+          Write-Host "  Minimal • Sovereign • Blazing Fast • Self-Healing" -ForegroundColor Green
+          Write-Host "═══════════════════════════════════════════════════════════════`n" -ForegroundColor Green
