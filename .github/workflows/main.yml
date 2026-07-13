@@ -51,6 +51,7 @@ jobs:
     steps:
       - id: set-matrix
         name: 🧮 Generate Runner Matrix
+        shell: bash
         run: |
           count=${{ inputs.instance_count }}
           matrix_json=$(seq 1 $count | jq -R . | jq -s -c '{id: .}')
