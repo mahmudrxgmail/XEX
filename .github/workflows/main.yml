@@ -165,9 +165,9 @@ jobs:
         run: |
           if ($env:TG_TOKEN -and $env:TG_CHAT) {
               Write-Host "📤 Dispatching Telegram Notification..." -ForegroundColor Cyan
-              $msg = "⚡ *Fabric Node Online*`n`n🖥 *Host:* `$env:TS_HOSTNAME``n🌐 *IP:* `$env:TS_IP``n👤 *User:* `$env:RDP_USER``n⏳ *Duration:* `$env:SESSION_MINUTES` min"
+              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min"
               $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
-              Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="Markdown"} -ErrorAction SilentlyContinue | Out-Null
+              Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
           } else {
               Write-Host "ℹ️ Telegram secrets missing. Printing credentials to console instead:"
               Write-Host "=========================================="
