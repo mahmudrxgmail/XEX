@@ -144,8 +144,8 @@ jobs:
           $hostname = "fabric-node-${env:RUN_ID}-${env:MATRIX_ID}"
           Write-Host "🔗 Authenticating node: $hostname" -ForegroundColor Yellow
 
-          # Launch with --ephemeral. Node auto-deletes from Tailnet when workflow ends!
-          & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$hostname" --ephemeral --accept-routes=false --unattended
+          # Launch Tailscale (Note: Ephemerality is controlled by the Auth Key type!)
+          & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$hostname" --accept-routes=false --unattended
           
           # Await IP Allocation
           $ip = ""; $timeout = 30
