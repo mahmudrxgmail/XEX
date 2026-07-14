@@ -101,6 +101,26 @@ jobs:
           # Defender Mitigation (Prevents CPU spikes during RDP)
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
 
+          # ── PREMIUM EXPERIENCE: RDP GRAPHICS & LATENCY OVERHAUL ──
+          Write-Host "✨ Injecting Premium Graphics & Latency Protocols..." -ForegroundColor Magenta
+          
+          # 1. System Timer Overclock (0.5ms) for ultra-low input latency
+          $TimerCode = 'using System; using System.Runtime.InteropServices; public class TimerRes { [DllImport("ntdll.dll", SetLastError = true)] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution); }'
+          Add-Type -TypeDefinition $TimerCode
+          [TimerRes]::NtSetTimerResolution(5000, $true, [ref]0) | Out-Null
+          
+          # 2. Force H.264 / AVC 444 encoding (Buttery smooth scrolling, low bandwidth)
+          $tsPolicies = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (-not (Test-Path $tsPolicies)) { New-Item -Path $tsPolicies -Force | Out-Null }
+          Set-ItemProperty -Path $tsPolicies -Name "fEnableH264" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path $tsPolicies -Name "fEnableH264444" -Value 1 -Type DWord -Force
+          
+          # 3. Prioritize Framerate (1) over Image Quality (2)
+          Set-ItemProperty -Path $tsPolicies -Name "RemoteDesktopProfile" -Value 1 -Type DWord -Force
+          
+          # 4. Disable heavy visual effects for new users (Improves software rendering speed)
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue
+
           # Network Demolition (Nagle's Algorithm off, TCP CUBIC)
           $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
           foreach ($iface in $interfaces) {
@@ -159,6 +179,13 @@ jobs:
           "TS_IP=$ip" | Out-File -Append $env:GITHUB_ENV
           "TS_HOSTNAME=$hostname" | Out-File -Append $env:GITHUB_ENV
           Write-Host "✅ Node attached. IP: $ip" -ForegroundColor Green
+          
+          # Premium Experience: Tune Tailscale MTU to eliminate VPN micro-stutters
+          $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" -or $_.Name -match "Tailscale" } | Select-Object -First 1
+          if ($tsAdapter) {
+              netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null
+              Write-Host "✨ Tailscale MTU optimized for ultra-low latency." -ForegroundColor Magenta
+          }
 
       # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────────
       - name: "📡 Phase 3: Telemetry Dispatch"
