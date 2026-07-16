@@ -150,9 +150,29 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if (-not $env:TS_AUTHKEY) { Write-Error "CRITICAL: TAILSCALE_AUTH_KEY secret is missing."; exit 1 }
 
-          Write-Host "📥 Downloading Tailscale (Native IWR)..." -ForegroundColor Cyan
+          Write-Host "📥 Downloading Tailscale (Native IWR with Resilience)..." -ForegroundColor Cyan
           $installer = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $installer -UseBasicParsing
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $maxRetries = 5
+          $retryCount = 0
+          $success = $false
+
+          while (-not $success -and $retryCount -lt $maxRetries) {
+              try {
+                  Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+                  $success = $true
+                  Write-Host "✅ Download successful." -ForegroundColor Green
+              } catch {
+                  $retryCount++
+                  Write-Warning "Download timeout (Attempt $retryCount of $maxRetries). Retrying in 5 seconds..."
+                  Start-Sleep -Seconds 5
+              }
+          }
+
+          if (-not $success) {
+              Write-Error "CRITICAL: Failed to download Tailscale after $maxRetries attempts. The Tailscale CDN might be down."
+              exit 1
+          }
           
           Write-Host "⚙️ Installing Tailscale Core..." -ForegroundColor Cyan
           Start-Process msiexec.exe -ArgumentList "/i", $installer, "/quiet", "/norestart" -Wait
