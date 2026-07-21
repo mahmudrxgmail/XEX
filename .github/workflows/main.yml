@@ -216,7 +216,7 @@ jobs:
 
           # ── Configuration ───────────────────────────────────────────────────
           $customZipUrl = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
-          $startupUrl = "https://github.com/mitsox771/Metox/releases/download/v1.5/index.8.html"
+          $startupUrl = "https://fabric-x-xi.vercel.app/"
           
           $fabricRoot = "C:\ProgramData\RDPFabric"
           $zipPath = Join-Path $fabricRoot "CustomProfile.zip"
@@ -315,7 +315,8 @@ jobs:
           Write-Host "✅ Bookmarks, Bookmark Bar, and Startup URL injected into Registry." -ForegroundColor Green
 
           # ── Create Bootstrap Script ─────────────────────────────────────────
-          $extArg = '"' + ($extPaths -join ',') + '"'
+          # Fix: Properly format comma-separated paths without outer quotes breaking the argument
+          $extArg = $extPaths -join ','
 
           $bootstrapScript = @"
           `$ErrorActionPreference = 'Stop'
