@@ -244,10 +244,16 @@ jobs:
           }
           if (-not $downloaded) { throw "Failed to download CustomProfile.zip after 5 attempts." }
 
+          # Unblock the ZIP to prevent Windows from marking it as risky
+          Unblock-File -Path $zipPath -ErrorAction SilentlyContinue
+
           # ── Extract and Process Contents ───────────────────────────────────
           Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+          
+          # Use System.IO.Compression for bulletproof extraction
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
 
           # 1. Locate Extensions (Find all manifest.json files)
           $manifestFiles = Get-ChildItem -Path $extractPath -Filter "manifest.json" -File -Recurse
@@ -261,11 +267,12 @@ jobs:
               $safeExtName = $extName -replace '\s', '_'
               $destDir = Join-Path $extensionsRoot $safeExtName
               
+              if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }
               New-Item -ItemType Directory -Path $destDir -Force | Out-Null
               Copy-Item -Path (Join-Path $extDir "*") -Destination $destDir -Recurse -Force
               
               $extPaths += $destDir
-              Write-Host "✅ Prepared Extension: $safeExtName" -ForegroundColor Green
+              Write-Host "✅ Prepared Extension: $safeExtName at $destDir" -ForegroundColor Green
           }
 
           if ($extPaths.Count -eq 0) {
@@ -314,8 +321,33 @@ jobs:
 
           Write-Host "✅ Bookmarks, Bookmark Bar, and Startup URL injected into Registry." -ForegroundColor Green
 
+          # 4. CRITICAL: Pre-seed Chrome Preferences to force Developer Mode ON
+          # Chrome blocks unpacked extensions via --load-extension if Dev Mode is off.
+          $chromeUserDataDir = "C:\Users\$env:RDP_USER\AppData\Local\Google\Chrome\User Data\Default"
+          New-Item -ItemType Directory -Path $chromeUserDataDir -Force | Out-Null
+          $prefsPath = Join-Path $chromeUserDataDir "Preferences"
+          
+          $prefsJson = '{"extensions":{"ui":{"developer_mode":true}}}'
+          Set-Content -Path $prefsPath -Value $prefsJson -Encoding UTF8 -Force
+          Write-Host "✅ Chrome Developer Mode forced ON in Preferences." -ForegroundColor Green
+
+          # 5. Fix NTFS Permissions
+          # The GitHub Action runs as SYSTEM. FabricAdmin needs explicit Read/Execute access to load the extensions!
+          $acl = Get-Acl $fabricRoot
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+          $acl.AddAccessRule($rule)
+          Set-Acl -Path $fabricRoot -AclObject $acl
+          
+          # Also fix ACL for Chrome User Data so FabricAdmin can write to it
+          $chromeUserRoot = "C:\Users\$env:RDP_USER\AppData\Local\Google\Chrome\User Data"
+          $chromeAcl = Get-Acl $chromeUserRoot
+          $chromeRule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+          $chromeAcl.AddAccessRule($chromeRule)
+          Set-Acl -Path $chromeUserRoot -AclObject $chromeAcl
+          
+          Write-Host "✅ NTFS Permissions fixed for FabricAdmin." -ForegroundColor Green
+
           # ── Create Bootstrap Script ─────────────────────────────────────────
-          # Fix: Properly format comma-separated paths without outer quotes breaking the argument
           $extArg = $extPaths -join ','
 
           $bootstrapScript = @"
@@ -346,11 +378,8 @@ jobs:
               `$shortcut.Save()
 
               # Launch Chrome (The Enterprise Policy will force it to open the Startup URL)
-              Start-Process -FilePath `$chromePath -ArgumentList @(
-                  "--load-extension=$extArg",
-                  "--new-window",
-                  "$startupUrl"
-              )
+              `$launchArgs = "--load-extension=$extArg --new-window $startupUrl"
+              Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
           } catch {
               Add-Content -Path `$logPath -Value "ERROR: `$(`$_.Exception.Message)"
               throw
