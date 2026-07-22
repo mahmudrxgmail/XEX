@@ -1,451 +1,465 @@
-- name: "🧩 Phase 2.5: Configure Chrome for Testing"
-  run: |
-    $ErrorActionPreference = 'Stop'
-
-    # ------------------------------------------------------------
-    # Configuration
-    # ------------------------------------------------------------
-    $customZipUrl = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
-    $startupUrl   = "https://fabric-x-xi.vercel.app/"
-
-    $fabricRoot    = "C:\ProgramData\RDPFabric"
-    $zipPath       = Join-Path $fabricRoot "CustomProfile.zip"
-    $extractPath   = Join-Path $fabricRoot "Extracted"
-    $extensionsDir = Join-Path $fabricRoot "Extensions"
-    $browserDir    = Join-Path $fabricRoot "ChromeForTesting"
-    $bootstrapPath = Join-Path $fabricRoot "ChromeBootstrap.ps1"
-
-    New-Item -ItemType Directory -Path $fabricRoot, $extensionsDir -Force |
-      Out-Null
-
-    # ------------------------------------------------------------
-    # Download extension bundle
-    # ------------------------------------------------------------
-    Write-Host "Downloading extension bundle..." -ForegroundColor Cyan
-
-    $downloaded = $false
-
-    for ($attempt = 1; $attempt -le 5; $attempt++) {
-        try {
-            Invoke-WebRequest `
-              -Uri $customZipUrl `
-              -OutFile $zipPath `
-              -UseBasicParsing
-
-            if ((Test-Path $zipPath) -and
-                ((Get-Item $zipPath).Length -gt 0)) {
-                $downloaded = $true
-                break
-            }
-        }
-        catch {
-            Write-Warning "Attempt $attempt failed: $($_.Exception.Message)"
-
-            if ($attempt -lt 5) {
-                Start-Sleep -Seconds 5
-            }
-        }
-    }
-
-    if (-not $downloaded) {
-        throw "Failed to download CustomProfile.zip."
-    }
-
-    Unblock-File -Path $zipPath -ErrorAction SilentlyContinue
-
-    Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $extensionsDir -Recurse -Force -ErrorAction SilentlyContinue
-
-    New-Item -ItemType Directory -Path $extractPath, $extensionsDir -Force |
-      Out-Null
-
-    Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-
-    # ------------------------------------------------------------
-    # Find and validate unpacked extensions
-    # ------------------------------------------------------------
-    $manifestFiles = @(
-        Get-ChildItem `
-          -Path $extractPath `
-          -Filter "manifest.json" `
-          -File `
-          -Recurse
-    )
-
-    if ($manifestFiles.Count -eq 0) {
-        throw "No manifest.json files were found in CustomProfile.zip."
-    }
-
-    $extensionPaths = [System.Collections.Generic.List[string]]::new()
-    $extensionNumber = 0
-
-    foreach ($manifestFile in $manifestFiles) {
-        $extensionNumber++
-
-        try {
-            $manifest = Get-Content $manifestFile.FullName -Raw |
-              ConvertFrom-Json
-        }
-        catch {
-            throw "Invalid manifest: $($manifestFile.FullName)"
-        }
-
-        if (-not $manifest.manifest_version) {
-            throw "manifest_version is missing: $($manifestFile.FullName)"
-        }
-
-        $sourceDirectory = $manifestFile.Directory.FullName
-        $sourceName = Split-Path $sourceDirectory -Leaf
-
-        # *, :, ?, quotes and several other characters are invalid
-        # in Windows directory names.
-        $safeName = $sourceName -replace '[^A-Za-z0-9._-]', '_'
-
-        if ([string]::IsNullOrWhiteSpace($safeName)) {
-            $safeName = "Extension"
-        }
-
-        $safeName = "{0:D2}-{1}" -f $extensionNumber, $safeName
-        $destination = Join-Path $extensionsDir $safeName
-
-        New-Item -ItemType Directory -Path $destination -Force |
-          Out-Null
-
-        Copy-Item `
-          -Path (Join-Path $sourceDirectory "*") `
-          -Destination $destination `
-          -Recurse `
-          -Force
-
-        if (-not (Test-Path (Join-Path $destination "manifest.json"))) {
-            throw "Extension copy failed: $destination"
-        }
-
-        $extensionPaths.Add($destination)
-
-        $displayName = if ($manifest.name) {
-            $manifest.name
-        }
-        else {
-            $safeName
-        }
-
-        Write-Host "Prepared extension: $displayName" `
-          -ForegroundColor Green
-    }
-
-    # ------------------------------------------------------------
-    # Download Chrome for Testing
-    #
-    # Official Google Chrome 137+ ignores --load-extension.
-    # Chrome for Testing continues to support it.
-    # ------------------------------------------------------------
-    Write-Host "Downloading Chrome for Testing..." `
-      -ForegroundColor Cyan
-
-    $metadataUrl = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
-    $metadata = Invoke-RestMethod -Uri $metadataUrl
-
-    $chromeDownload = $metadata.channels.Stable.downloads.chrome |
-      Where-Object { $_.platform -eq "win64" } |
-      Select-Object -First 1
-
-    if (-not $chromeDownload.url) {
-        throw "Chrome for Testing win64 download was not found."
-    }
-
-    $browserZip = Join-Path $fabricRoot "chrome-for-testing.zip"
-
-    Invoke-WebRequest `
-      -Uri $chromeDownload.url `
-      -OutFile $browserZip `
-      -UseBasicParsing
-
-    Remove-Item $browserDir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Path $browserDir -Force | Out-Null
-
-    Expand-Archive `
-      -Path $browserZip `
-      -DestinationPath $browserDir `
-      -Force
-
-    $chromePath = Get-ChildItem `
-      -Path $browserDir `
-      -Filter "chrome.exe" `
-      -File `
-      -Recurse |
-      Select-Object -First 1 -ExpandProperty FullName
-
-    if (-not $chromePath -or -not (Test-Path $chromePath)) {
-        throw "Chrome for Testing executable was not found."
-    }
-
-    Write-Host "Browser: $chromePath" -ForegroundColor Green
-
-    # ------------------------------------------------------------
-    # Chrome policies
-    # ------------------------------------------------------------
-    $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
-
-    New-Item -Path $chromePolicyPath -Force | Out-Null
-
-    # Display the bookmark bar.
-    New-ItemProperty `
-      -Path $chromePolicyPath `
-      -Name "BookmarkBarEnabled" `
-      -PropertyType DWord `
-      -Value 1 `
-      -Force |
-      Out-Null
-
-    # Startup URLs are a registry list, not a JSON string.
-    New-ItemProperty `
-      -Path $chromePolicyPath `
-      -Name "RestoreOnStartup" `
-      -PropertyType DWord `
-      -Value 4 `
-      -Force |
-      Out-Null
-
-    $startupPolicyPath = Join-Path `
-      $chromePolicyPath `
-      "RestoreOnStartupURLs"
-
-    Remove-Item $startupPolicyPath `
-      -Recurse `
-      -Force `
-      -ErrorAction SilentlyContinue
-
-    New-Item -Path $startupPolicyPath -Force | Out-Null
-
-    New-ItemProperty `
-      -Path $startupPolicyPath `
-      -Name "1" `
-      -PropertyType String `
-      -Value $startupUrl `
-      -Force |
-      Out-Null
-
-    # ------------------------------------------------------------
-    # Convert bookmarks HTML to ManagedBookmarks policy
-    # ------------------------------------------------------------
-    $bookmarkObjects = @(
-        @{
-            toplevel_name = "RDP Fabric"
-        }
-    )
-
-    $htmlFile = Get-ChildItem `
-      -Path $extractPath `
-      -Filter "*.html" `
-      -File `
-      -Recurse |
-      Select-Object -First 1
-
-    if ($htmlFile) {
-        $htmlContent = Get-Content $htmlFile.FullName -Raw
-        $bookmarkRegex = [regex]::new(
-            '<A\s+[^>]*HREF="([^"]+)"[^>]*>([^<]+)</A>',
-            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-        )
-
-        $bookmarkMatches = $bookmarkRegex.Matches($htmlContent)
-
-        foreach ($bookmarkMatch in $bookmarkMatches) {
-            $bookmarkUrl = [System.Net.WebUtility]::HtmlDecode(
-                $bookmarkMatch.Groups[1].Value
-            )
-
-            $bookmarkName = [System.Net.WebUtility]::HtmlDecode(
-                $bookmarkMatch.Groups[2].Value
-            ).Trim()
-
-            if ($bookmarkUrl -and $bookmarkName) {
-                $bookmarkObjects += @{
-                    name = $bookmarkName
-                    url  = $bookmarkUrl
-                }
-            }
-        }
-
-        Write-Host "Imported $($bookmarkMatches.Count) bookmarks."
-    }
-    else {
-        Write-Warning "No bookmarks HTML file was found."
-    }
-
-    $bookmarkJson = $bookmarkObjects |
-      ConvertTo-Json -Depth 20 -Compress
-
-    New-ItemProperty `
-      -Path $chromePolicyPath `
-      -Name "ManagedBookmarks" `
-      -PropertyType String `
-      -Value $bookmarkJson `
-      -Force |
-      Out-Null
-
-    # ------------------------------------------------------------
-    # Create login bootstrap
-    # ------------------------------------------------------------
-    $joinedExtensionPaths = $extensionPaths -join ","
-
-    $bootstrapTemplate = @'
-    $ErrorActionPreference = "Stop"
-
-    $chromePath    = '__CHROME_PATH__'
-    $extensionArg = '__EXTENSION_PATHS__'
-    $startupUrl   = '__STARTUP_URL__'
-
-    $logRoot = Join-Path $env:LOCALAPPDATA "RDPFabric"
-    $profile = Join-Path $logRoot "ChromeProfile"
-    $logPath = Join-Path $logRoot "chrome-bootstrap.log"
-
-    New-Item -ItemType Directory -Path $logRoot, $profile -Force |
-        Out-Null
-
-    try {
-        Start-Transcript -Path $logPath -Append | Out-Null
-
-        # Avoid a previously running browser swallowing the arguments.
-        Get-Process chrome -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Path -eq $chromePath
-            } |
-            Stop-Process -Force -ErrorAction SilentlyContinue
-
-        $arguments = @(
-            "--user-data-dir=`"$profile`""
-            "--no-first-run"
-            "--no-default-browser-check"
-            "--load-extension=`"$extensionArg`""
-            "--new-window"
-            "`"$startupUrl`""
-        ) -join " "
-
-        $processInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $processInfo.FileName = $chromePath
-        $processInfo.Arguments = $arguments
-        $processInfo.UseShellExecute = $true
-
-        [System.Diagnostics.Process]::Start($processInfo) | Out-Null
-    }
-    catch {
-        Add-Content `
-          -Path $logPath `
-          -Value "ERROR: $($_.Exception.Message)"
-
-        throw
-    }
-    finally {
-        try {
-            Stop-Transcript | Out-Null
-        }
-        catch {}
-    }
-    '@
-
-    $bootstrapScript = $bootstrapTemplate `
-      .Replace(
-          "__CHROME_PATH__",
-          $chromePath.Replace("'", "''")
-      ) `
-      .Replace(
-          "__EXTENSION_PATHS__",
-          $joinedExtensionPaths.Replace("'", "''")
-      ) `
-      .Replace(
-          "__STARTUP_URL__",
-          $startupUrl.Replace("'", "''")
-      )
-
-    Set-Content `
-      -Path $bootstrapPath `
-      -Value $bootstrapScript `
-      -Encoding UTF8 `
-      -Force
-
-    # ------------------------------------------------------------
-    # Permissions
-    # ------------------------------------------------------------
-    $account = "$env:COMPUTERNAME\$env:RDP_USER"
-
-    & icacls.exe $fabricRoot `
-      /grant "${account}:(OI)(CI)F" `
-      /T `
-      /C |
-      Out-Null
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to grant FabricAdmin access to $fabricRoot."
-    }
-
-    # ------------------------------------------------------------
-    # Desktop shortcut
-    # ------------------------------------------------------------
-    $desktopPath = "C:\Users\$env:RDP_USER\Desktop"
-    New-Item -ItemType Directory -Path $desktopPath -Force | Out-Null
-
-    $shortcutPath = Join-Path `
-      $desktopPath `
-      "Chrome for Testing - Fabric.lnk"
-
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
-
-    $shortcut.TargetPath = "powershell.exe"
-    $shortcut.Arguments = (
-        '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f
-        $bootstrapPath
-    )
-    $shortcut.WorkingDirectory = $fabricRoot
-    $shortcut.IconLocation = "$chromePath,0"
-    $shortcut.Description = "Launch Fabric extensions in Chrome for Testing"
-    $shortcut.Save()
-
-    # ------------------------------------------------------------
-    # Scheduled login task
-    # ------------------------------------------------------------
-    $taskName = "RDPFabric-ChromeBootstrap"
-
-    $taskArguments = (
-        '-NoProfile -ExecutionPolicy Bypass ' +
-        '-WindowStyle Hidden -File "{0}"' -f $bootstrapPath
-    )
-
-    $taskAction = New-ScheduledTaskAction `
-      -Execute "powershell.exe" `
-      -Argument $taskArguments
-
-    $taskTrigger = New-ScheduledTaskTrigger `
-      -AtLogOn `
-      -User $account
-
-    $taskTrigger.Delay = "PT10S"
-
-    $taskPrincipal = New-ScheduledTaskPrincipal `
-      -UserId $account `
-      -LogonType Interactive `
-      -RunLevel Limited
-
-    $taskSettings = New-ScheduledTaskSettingsSet `
-      -AllowStartIfOnBatteries `
-      -DontStopIfGoingOnBatteries `
-      -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
-
-    Register-ScheduledTask `
-      -TaskName $taskName `
-      -Action $taskAction `
-      -Trigger $taskTrigger `
-      -Principal $taskPrincipal `
-      -Settings $taskSettings `
-      -Description "Launch Chrome for Testing with authorized unpacked extensions." `
-      -Force |
-      Out-Null
-
-    Write-Host ""
-    Write-Host "Chrome extension automation configured." `
-      -ForegroundColor Green
-    Write-Host "Extensions: $($extensionPaths.Count)"
-    Write-Host "Browser: $chromePath"
-    Write-Host "Task: $taskName"
+name: "RDP Fabric (Pure Tailscale)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TAILSCALE RDP FABRIC — Flagship Architecture
+# ═══════════════════════════════════════════════════════════════════════════
+#  ⚡ Pure Tailscale Architecture (Zero CRD/RustDesk cruft)
+#  ⚡ Ephemeral Nodes (Auto-purges from Tailnet on exit — No API needed)
+#  ⚡ Native GH CLI Handoff (Failsafe recursive cycle dispatch)
+#  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
+#  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
+#  ⚡ Zero-Touch Chrome Automation (Extensions, Bookmarks & Startup URL)
+# ═══════════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_count:
+        description: "Number of parallel RDP runners (1-10)"
+        required: true
+        default: "1"
+        type: choice
+        options: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+      runtime_minutes:
+        description: "Session duration in minutes (max 355)"
+        required: true
+        default: "355"
+      cycles:
+        description: "Number of automated respawn cycles left (0 = stop)"
+        required: false
+        default: "0"
+      quick_test:
+        description: "Run 5-minute smoke test"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write # Required for self-dispatching cycles
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  # ═════════════════════════════════════════════════════════════════════════
+  # ⚙️ MATRIX GENERATOR
+  # ═════════════════════════════════════════════════════════════════════════
+  orchestrate:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        name: 🧮 Generate Runner Matrix
+        shell: bash
+        run: |
+          count=${{ inputs.instance_count }}
+          matrix_json=$(seq 1 $count | jq -R . | jq -s -c '{id: .}')
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+          echo "Orchestrating $count runner(s)."
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # 🚀 CORE RUNNER
+  # ═════════════════════════════════════════════════════════════════════════
+  fabric:
+    needs: orchestrate
+    runs-on: windows-latest
+    strategy:
+      matrix: ${{ fromJson(needs.orchestrate.outputs.matrix) }}
+      max-parallel: 10
+      fail-fast: false
+    timeout-minutes: 360
+
+    env:
+      TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+      RDP_USER: "FabricAdmin"
+      MATRIX_ID: ${{ matrix.id }}
+      RUN_ID: ${{ github.run_id }}
+
+    steps:
+      # ── 1. DEPENDENCY-FREE INITIALIZATION ──────────────────────────────────
+      - name: "⚡ Phase 1: Native Initialization & Optimization"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "🚀 INITIALIZING TAILSCALE FABRIC..." -ForegroundColor Cyan
+
+          # Calculate Runtime
+          $runtime = [int]"${{ inputs.runtime_minutes }}"
+          if ("${{ inputs.quick_test }}" -eq "true") { $runtime = 5 }
+          if ($runtime -gt 355) { $runtime = 355 }
+          "SESSION_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
+
+          # Windows Power & Sleep Demolition
+          powercfg /change standby-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          powercfg /hibernate off
+          powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c # High Performance
+
+          # Defender Mitigation (Prevents CPU spikes during RDP)
+          Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
+
+          # ── PREMIUM EXPERIENCE: RDP GRAPHICS & LATENCY OVERHAUL ──
+          Write-Host "✨ Injecting Premium Graphics & Latency Protocols..." -ForegroundColor Magenta
+          
+          # 1. System Timer Overclock (0.5ms) for ultra-low input latency
+          $TimerCode = 'using System; using System.Runtime.InteropServices; public class TimerRes { [DllImport("ntdll.dll", SetLastError = true)] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution); }'
+          Add-Type -TypeDefinition $TimerCode
+          [TimerRes]::NtSetTimerResolution(5000, $true, [ref]0) | Out-Null
+          
+          # 2. Force H.264 / AVC 444 encoding (Buttery smooth scrolling, low bandwidth)
+          $tsPolicies = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (-not (Test-Path $tsPolicies)) { New-Item -Path $tsPolicies -Force | Out-Null }
+          Set-ItemProperty -Path $tsPolicies -Name "fEnableH264" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path $tsPolicies -Name "fEnableH264444" -Value 1 -Type DWord -Force
+          
+          # 3. Prioritize Framerate (1) over Image Quality (2)
+          Set-ItemProperty -Path $tsPolicies -Name "RemoteDesktopProfile" -Value 1 -Type DWord -Force
+          
+          # 4. Disable heavy visual effects for new users (Improves software rendering speed)
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue
+
+          # Network Demolition (Nagle's Algorithm off, TCP CUBIC)
+          $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+          foreach ($iface in $interfaces) {
+              Set-ItemProperty -Path $iface.PSPath -Name "TcpAckFrequency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+              Set-ItemProperty -Path $iface.PSPath -Name "TCPNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          }
+          try { Set-NetTCPSetting -SettingName InternetCustom -CongestionProvider CUBIC -ErrorAction SilentlyContinue } catch {}
+
+          # Provision RDP Admin
+          if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
+          $secPass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
+          New-LocalUser -Name $env:RDP_USER -Password $secPass -Description "Fabric RDP User" -AccountNeverExpires -ErrorAction SilentlyContinue | Out-Null
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER -ErrorAction SilentlyContinue
+
+          # Enable RDP & UDP Transport
+          $tsCtrl = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+          Set-ItemProperty -Path $tsCtrl -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fClientDisableUDP" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          
+          Write-Host "✅ OS Layer Optimized. RDP Ready." -ForegroundColor Green
+
+      # ── 2. TAILSCALE MESH INJECTION ────────────────────────────────────────
+      - name: "🌐 Phase 2: Tailscale Ephemeral Mesh"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TS_AUTHKEY) { Write-Error "CRITICAL: TAILSCALE_AUTH_KEY secret is missing."; exit 1 }
+
+          Write-Host "📥 Downloading Tailscale (Native IWR with Resilience)..." -ForegroundColor Cyan
+          $installer = "$env:TEMP\tailscale.msi"
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $maxRetries = 5
+          $retryCount = 0
+          $success = $false
+
+          while (-not $success -and $retryCount -lt $maxRetries) {
+              try {
+                  Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+                  $success = $true
+                  Write-Host "✅ Download successful." -ForegroundColor Green
+              } catch {
+                  $retryCount++
+                  Write-Warning "Download timeout (Attempt $retryCount of $maxRetries). Retrying in 5 seconds..."
+                  Start-Sleep -Seconds 5
+              }
+          }
+
+          if (-not $success) {
+              Write-Error "CRITICAL: Failed to download Tailscale after $maxRetries attempts. The Tailscale CDN might be down."
+              exit 1
+          }
+          
+          Write-Host "⚙️ Installing Tailscale Core..." -ForegroundColor Cyan
+          Start-Process msiexec.exe -ArgumentList "/i", $installer, "/quiet", "/norestart" -Wait
+          
+          $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsPath)) { Write-Error "Tailscale installation failed."; exit 1 }
+
+          # Construct unique ephemeral hostname
+          $hostname = "fabric-node-${env:RUN_ID}-${env:MATRIX_ID}"
+          Write-Host "🔗 Authenticating node: $hostname" -ForegroundColor Yellow
+
+          # Launch Tailscale (Note: Ephemerality is controlled by the Auth Key type!)
+          & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$hostname" --accept-routes=false --unattended
+          
+          # Await IP Allocation
+          $ip = ""; $timeout = 30
+          while (-not ($ip -match "^\d{1,3}(\.\d{1,3}){3}$") -and $timeout -gt 0) {
+              Start-Sleep -Seconds 1
+              $ip = (& $tsPath ip -4 | Out-String).Trim()
+              $timeout--
+          }
+          if (-not $ip) { Write-Error "Failed to acquire Tailscale IP."; exit 1 }
+          
+          "TS_IP=$ip" | Out-File -Append $env:GITHUB_ENV
+          "TS_HOSTNAME=$hostname" | Out-File -Append $env:GITHUB_ENV
+          Write-Host "✅ Node attached. IP: $ip" -ForegroundColor Green
+          
+          # Premium Experience: Tune Tailscale MTU to eliminate VPN micro-stutters
+          $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" -or $_.Name -match "Tailscale" } | Select-Object -First 1
+          if ($tsAdapter) {
+              netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null
+              Write-Host "✨ Tailscale MTU optimized for ultra-low latency." -ForegroundColor Magenta
+          }
+
+      # ── 2.5. CHROME EXTENSIONS & BOOKMARKS AUTO-INJECTION ─────────────────────
+      - name: "🧩 Phase 2.5: Auto-Inject Extensions, Bookmarks & Startup URL"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "🧩 Auto-Injecting Custom Extensions, Bookmarks & Startup URL..." -ForegroundColor Cyan
+
+          # ── Configuration ───────────────────────────────────────────────────
+          $customZipUrl = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
+          $startupUrl = "https://fabric-x-xi.vercel.app/"
+          
+          $fabricRoot = "C:\ProgramData\RDPFabric"
+          $zipPath = Join-Path $fabricRoot "CustomProfile.zip"
+          $extractPath = Join-Path $fabricRoot "Extracted"
+          $extensionsRoot = Join-Path $fabricRoot "Extensions"
+          $bootstrapPath = Join-Path $fabricRoot "ChromeBootstrap.ps1"
+
+          New-Item -ItemType Directory -Path $fabricRoot -Force | Out-Null
+          New-Item -ItemType Directory -Path $extensionsRoot -Force | Out-Null
+
+          # ── Download ZIP ──────────────────────────────────────────────────
+          Write-Host "📥 Downloading CustomProfile.zip..." -ForegroundColor Cyan
+          $downloaded = $false
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+              try {
+                  Invoke-WebRequest -Uri $customZipUrl -OutFile $zipPath -UseBasicParsing
+                  if ((Test-Path $zipPath) -and ((Get-Item $zipPath).Length -gt 0)) {
+                      $downloaded = $true
+                      break
+                  }
+              } catch {
+                  Write-Warning "Download attempt $attempt failed: $($_.Exception.Message)"
+                  Start-Sleep -Seconds 5
+              }
+          }
+          if (-not $downloaded) { throw "Failed to download CustomProfile.zip after 5 attempts." }
+
+          # Unblock the ZIP to prevent Windows from marking it as risky
+          Unblock-File -Path $zipPath -ErrorAction SilentlyContinue
+
+          # ── Extract and Process Contents ───────────────────────────────────
+          Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+          
+          # Use System.IO.Compression for bulletproof extraction
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
+
+          # 1. Locate Extensions (Find all manifest.json files)
+          $manifestFiles = Get-ChildItem -Path $extractPath -Filter "manifest.json" -File -Recurse
+          $extPaths = @()
+
+          foreach ($manifest in $manifestFiles) {
+              $extDir = $manifest.DirectoryName
+              $extName = Split-Path $extDir -Leaf
+              
+              # Chrome --load-extension fails if paths have spaces. Sanitize folder name.
+              $safeExtName = $extName -replace '\s', '_'
+              $destDir = Join-Path $extensionsRoot $safeExtName
+              
+              if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }
+              New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+              Copy-Item -Path (Join-Path $extDir "*") -Destination $destDir -Recurse -Force
+              
+              $extPaths += $destDir
+              Write-Host "✅ Prepared Extension: $safeExtName at $destDir" -ForegroundColor Green
+          }
+
+          if ($extPaths.Count -eq 0) {
+              throw "No Chrome extensions (manifest.json) found in the ZIP."
+          }
+
+          # 2. Auto-Parse Bookmarks HTML to JSON for Enterprise Policy
+          $htmlFile = Get-ChildItem -Path $extractPath -Filter "*.html" -File -Recurse | Select-Object -First 1
+          $bookmarkObjects = @(
+              @{ toplevel_name = "RDP Fabric" }
+          )
+
+          if ($htmlFile) {
+              Write-Host "📖 Parsing Bookmarks HTML automatically..." -ForegroundColor Cyan
+              $htmlContent = Get-Content $htmlFile.FullName -Raw
+              
+              # Regex matches standard Chrome HTML bookmark exports
+              $regex = [regex]'<A\s+HREF="([^"]+)"[^>]*>([^<]+)</A>'
+              $matches = $regex.Matches($htmlContent)
+              
+              foreach ($match in $matches) {
+                  $url = $match.Groups[1].Value
+                  $name = $match.Groups[2].Value.Trim()
+                  $bookmarkObjects += @{ name = $name; url = $url }
+              }
+              Write-Host "✅ Extracted $($matches.Count) bookmarks and converted to native Chrome format." -ForegroundColor Green
+          } else {
+              Write-Warning "No bookmarks HTML file found in the ZIP."
+          }
+
+          # 3. Inject Bookmarks, Startup URL & Policies into Windows Registry
+          $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
+          New-Item -Path $chromePolicyPath -Force | Out-Null
+
+          # Inject Bookmarks
+          $bookmarkJson = $bookmarkObjects | ConvertTo-Json -Depth 10 -Compress
+          New-ItemProperty -Path $chromePolicyPath -Name "ManagedBookmarks" -PropertyType String -Value $bookmarkJson -Force | Out-Null
+          
+          # Force Bookmark Bar to be visible automatically
+          New-ItemProperty -Path $chromePolicyPath -Name "BookmarkBarEnabled" -PropertyType DWord -Value 1 -Force | Out-Null
+
+          # Force Chrome to open the specific startup URL automatically
+          New-ItemProperty -Path $chromePolicyPath -Name "RestoreOnStartup" -PropertyType DWord -Value 4 -Force | Out-Null
+          $startupUrlsJson = "[`"$startupUrl`"]"
+          New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
+
+          Write-Host "✅ Bookmarks, Bookmark Bar, and Startup URL injected into Registry." -ForegroundColor Green
+
+          # 4. CRITICAL: Pre-seed Chrome Preferences to force Developer Mode ON
+          # Chrome blocks unpacked extensions via --load-extension if Dev Mode is off.
+          $chromeUserDataDir = "C:\Users\$env:RDP_USER\AppData\Local\Google\Chrome\User Data\Default"
+          New-Item -ItemType Directory -Path $chromeUserDataDir -Force | Out-Null
+          $prefsPath = Join-Path $chromeUserDataDir "Preferences"
+          
+          $prefsJson = '{"extensions":{"ui":{"developer_mode":true}}}'
+          Set-Content -Path $prefsPath -Value $prefsJson -Encoding UTF8 -Force
+          Write-Host "✅ Chrome Developer Mode forced ON in Preferences." -ForegroundColor Green
+
+          # 5. Fix NTFS Permissions
+          # The GitHub Action runs as SYSTEM. FabricAdmin needs explicit Read/Execute access to load the extensions!
+          $acl = Get-Acl $fabricRoot
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+          $acl.AddAccessRule($rule)
+          Set-Acl -Path $fabricRoot -AclObject $acl
+          
+          # Also fix ACL for Chrome User Data so FabricAdmin can write to it
+          $chromeUserRoot = "C:\Users\$env:RDP_USER\AppData\Local\Google\Chrome\User Data"
+          $chromeAcl = Get-Acl $chromeUserRoot
+          $chromeRule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+          $chromeAcl.AddAccessRule($chromeRule)
+          Set-Acl -Path $chromeUserRoot -AclObject $chromeAcl
+          
+          Write-Host "✅ NTFS Permissions fixed for FabricAdmin." -ForegroundColor Green
+
+          # ── Create Bootstrap Script ─────────────────────────────────────────
+          $extArg = $extPaths -join ','
+
+          $bootstrapScript = @"
+          `$ErrorActionPreference = 'Stop'
+          `$logRoot = Join-Path `$env:LOCALAPPDATA 'RDPFabric'
+          New-Item -ItemType Directory -Path `$logRoot -Force | Out-Null
+          `$logPath = Join-Path `$logRoot 'chrome-bootstrap.log'
+          
+          try {
+              Start-Transcript -Path `$logPath -Append | Out-Null
+              
+              `$chromeCandidates = @(
+                  "`${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+                  "`${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+                  "`$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+              )
+              `$chromePath = `$chromeCandidates | Where-Object { Test-Path `$_ } | Select-Object -First 1
+              if (-not `$chromePath) { throw "Google Chrome is not installed." }
+
+              # Create Desktop Shortcut
+              `$shell = New-Object -ComObject WScript.Shell
+              `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
+              `$shortcut.TargetPath = `$chromePath
+              `$shortcut.Arguments = "--load-extension=$extArg"
+              `$shortcut.WorkingDirectory = Split-Path `$chromePath
+              `$shortcut.IconLocation = "`$chromePath,0"
+              `$shortcut.Description = "Launch Chrome with Fabric Custom Extensions"
+              `$shortcut.Save()
+
+              # Launch Chrome (The Enterprise Policy will force it to open the Startup URL)
+              `$launchArgs = "--load-extension=$extArg --new-window $startupUrl"
+              Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
+          } catch {
+              Add-Content -Path `$logPath -Value "ERROR: `$(`$_.Exception.Message)"
+              throw
+          } finally {
+              try { Stop-Transcript | Out-Null } catch {}
+          }
+          "@
+
+          Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8 -Force
+
+          # ── Schedule Chrome to open on Login ───────────────────────────────
+          $taskName = "RDPFabric-ChromeBootstrap"
+          $taskUser = "$env:COMPUTERNAME\$env:RDP_USER"
+
+          $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bootstrapPath`""
+          $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+          $taskTrigger.Delay = "PT10S" 
+
+          $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
+          $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+
+          Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Description "Launches Custom Chrome Extensions, Bookmarks, and Startup URL." -Force | Out-Null
+
+          Write-Host "✅ Full Chrome automation successfully provisioned." -ForegroundColor Green
+
+      # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────────
+      - name: "📡 Phase 3: Telemetry Dispatch"
+        run: |
+          if ($env:TG_TOKEN -and $env:TG_CHAT) {
+              Write-Host "📤 Dispatching Telegram Notification..." -ForegroundColor Cyan
+              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min"
+              $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
+              Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
+          } else {
+              Write-Host "ℹ️ Telegram secrets missing. Printing credentials to console instead:"
+              Write-Host "=========================================="
+              Write-Host " CONNECT VIA RDP"
+              Write-Host " IP:   $env:TS_IP"
+              Write-Host " USER: $env:RDP_USER"
+              Write-Host "=========================================="
+          }
+
+      # ── 4. SUSTAIN & CYCLE HANDOFF ─────────────────────────────────────────
+      - name: "⏳ Phase 4: Session Hold & Cycle Handoff"
+        env:
+          # Use GH_PAT if it exists, otherwise fallback to the default github.token
+          GH_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $minutes = [int]$env:SESSION_MINUTES
+          Write-Host "🛡️ Holding session for $minutes minutes..." -ForegroundColor Cyan
+
+          # Keep-alive loop to prevent GH Action runner stall timeout
+          $start = Get-Date
+          while ((New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes -lt $minutes) {
+              Start-Sleep -Seconds 300 # Pulse every 5 mins
+              Write-Host "Heartbeat: Node $env:TS_HOSTNAME is active..."
+          }
+
+          Write-Host "🏁 Session duration complete." -ForegroundColor Green
+
+          # Failsafe native GitHub CLI recursive dispatch
+          $cycles = [int]"${{ inputs.cycles }}"
+          if ($cycles -gt 0) {
+              $next = $cycles - 1
+              Write-Host "🔄 Initiating Cycle Handoff (Remaining: $next)..." -ForegroundColor Yellow
+              
+              # Use native pre-installed GH CLI instead of manual REST construction
+              gh workflow run "${{ github.workflow }}" `
+                --ref "${{ github.ref_name }}" `
+                -f instance_count="${{ inputs.instance_count }}" `
+                -f runtime_minutes="${{ inputs.runtime_minutes }}" `
+                -f quick_test="${{ inputs.quick_test }}" `
+                -f cycles="$next"
+              
+              if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✅ Handoff successfully dispatched!" -ForegroundColor Green
+              } else {
+                  Write-Error "❌ Handoff failed."
+              }
+          } else {
+              Write-Host "🛑 No cycles remaining. Shutting down gracefully."
+          }
