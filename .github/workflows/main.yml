@@ -8,7 +8,7 @@ name: "RDP Fabric (Pure Tailscale)"
 #  ⚡ Native GH CLI Handoff (Failsafe recursive cycle dispatch)
 #  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
 #  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
-#  ⚡ Zero-Touch Chrome CRX Automation (HTTP Server + Policy + Bootstrap Fallback)
+#  ⚡ Zero-Touch Chrome CRX Automation (Python Packager + HTTP Server + Policy)
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -182,124 +182,161 @@ jobs:
           $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" -or $_.Name -match "Tailscale" } | Select-Object -First 1
           if ($tsAdapter) { netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null }
 
-      # ── 2.5. CHROME CRX PACKAGING & POLICY INJECTION ─────────────────────────
-      - name: "🧩 Phase 2.5: CRX Packaging, Micro HTTP Server & Policy Injection"
+      # ── 2.5. PYTHON CRX PACKAGING & POLICY INJECTION ────────────────────────
+      - name: "🧩 Phase 2.5: Python CRX Packager & Policy Injection"
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "🧩 Auto-Injecting Custom Extensions via Micro HTTP Server..." -ForegroundColor Cyan
+          Write-Host "🧩 Auto-Injecting Custom Extensions via Python Packager..." -ForegroundColor Cyan
 
-          $customZipUrl = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
-          $startupUrl = "https://fabric-x-xi.vercel.app/"
-          
           $fabricRoot = "C:\ProgramData\RDPFabric"
-          $zipPath = Join-Path $fabricRoot "CustomProfile.zip"
-          $extractPath = Join-Path $fabricRoot "Extracted"
           $extensionsRoot = Join-Path $fabricRoot "Extensions"
           $bootstrapPath = Join-Path $fabricRoot "ChromeBootstrap.ps1"
           $httpServerPath = Join-Path $fabricRoot "HttpServer.ps1"
+          $pyScriptPath = Join-Path $fabricRoot "pack_extensions.py"
+          $startupUrl = "https://fabric-x-xi.vercel.app/"
 
           New-Item -ItemType Directory -Path $fabricRoot -Force | Out-Null
           New-Item -ItemType Directory -Path $extensionsRoot -Force | Out-Null
 
-          # Download & Extract
-          Invoke-WebRequest -Uri $customZipUrl -OutFile $zipPath -UseBasicParsing
-          Unblock-File -Path $zipPath -ErrorAction SilentlyContinue
-          Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
+          # ── Write Python Script ──
+          $pyScript = @'
+          import os
+          import json
+          import hashlib
+          import base64
+          import shutil
+          import zipfile
+          import sys
+          import subprocess
 
-          # Locate Chrome
-          $chromeCandidates = @(
-              "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
-              "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-              "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-          )
-          $chromePath = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $chromePath) { throw "Google Chrome is not installed." }
+          try:
+              from cryptography.hazmat.primitives.asymmetric import rsa
+              from cryptography.hazmat.primitives import serialization
+              import requests
+              from crx3 import create_crx
+          except ImportError:
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "cryptography", "crx3", "requests"])
+              from cryptography.hazmat.primitives.asymmetric import rsa
+              from cryptography.hazmat.primitives import serialization
+              import requests
+              from crx3 import create_crx
 
-          # Pack Extensions
-          $manifestFiles = Get-ChildItem -Path $extractPath -Filter "manifest.json" -File -Recurse
-          $packedExtensions = @()
+          ZIP_URL = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
+          FABRIC_ROOT = r"C:\ProgramData\RDPFabric"
+          EXTENSIONS_ROOT = os.path.join(FABRIC_ROOT, "Extensions")
+          EXTRACT_PATH = os.path.join(FABRIC_ROOT, "Extracted")
 
-          foreach ($manifest in $manifestFiles) {
-              $extDir = $manifest.DirectoryName
-              $extName = Split-Path $extDir -Leaf
-              $safeExtName = $extName -replace '\s', '_'
-              $destDir = Join-Path $extensionsRoot $safeExtName
-              
-              if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }
-              New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-              Copy-Item -Path (Join-Path $extDir "*") -Destination $destDir -Recurse -Force
-              
-              # CRITICAL FIX: Delete any existing key.pem inside the extension folder
-              $existingPem = Join-Path $destDir "key.pem"
-              if (Test-Path $existingPem) { Remove-Item $existingPem -Force -ErrorAction SilentlyContinue }
+          os.makedirs(FABRIC_ROOT, exist_ok=True)
+          os.makedirs(EXTENSIONS_ROOT, exist_ok=True)
 
-              # Generate RSA Keypair
-              $rsa = [System.Security.Cryptography.RSA]::Create(2048)
-              $pubKeyDer = $rsa.ExportSubjectPublicKeyInfo()
-              $privKeyDer = $rsa.ExportPkcs8PrivateKey()
+          zip_path = os.path.join(FABRIC_ROOT, "CustomProfile.zip")
+          r = requests.get(ZIP_URL)
+          with open(zip_path, 'wb') as f:
+              f.write(r.content)
 
-              # Calculate Chrome Extension ID Safely
-              $sha256 = [System.Security.Cryptography.SHA256]::Create()
-              $hash = $sha256.ComputeHash($pubKeyDer)
-              $id = -join ($hash | Select-Object -First 16 | ForEach-Object {
-                  $c1 = [char](($_ -shr 4) + [int][char]'a')
-                  $c2 = [char](($_ -band 0x0F) + [int][char]'a')
-                  "$c1$c2"
-              })
+          if os.path.exists(EXTRACT_PATH):
+              shutil.rmtree(EXTRACT_PATH)
+          os.makedirs(EXTRACT_PATH)
+          with zipfile.ZipFile(zip_path, 'r') as z:
+              z.extractall(EXTRACT_PATH)
 
-              # CRITICAL FIX: Save Private Key OUTSIDE the extension directory
-              $b64 = [Convert]::ToBase64String($privKeyDer)
-              $pem = "-----BEGIN PRIVATE KEY-----`n"
-              for ($i = 0; $i -lt $b64.Length; $i += 64) { $pem += $b64.Substring($i, [Math]::Min(64, $b64.Length - $i)) + "`n" }
-              $pem += "-----END PRIVATE KEY-----"
-              $pemPath = Join-Path $extensionsRoot "$safeExtName.pem"
-              Set-Content -Path $pemPath -Value $pem -Encoding ASCII -Force
+          extensions = []
 
-              # Inject "key" into manifest
-              $manifestPath = Join-Path $destDir "manifest.json"
-              $manifestObj = Get-Content $manifestPath -Raw | ConvertFrom-Json
-              $pubKeyB64 = [Convert]::ToBase64String($pubKeyDer)
-              if ($null -ne $manifestObj.key) { $manifestObj.key = $pubKeyB64 }
-              else { $manifestObj | Add-Member -NotePropertyName "key" -NotePropertyValue $pubKeyB64 }
-              $manifestObj | ConvertTo-Json -Depth 10 | Set-Content $manifestPath -Encoding UTF8 -Force
+          for root, dirs, files in os.walk(EXTRACT_PATH):
+              if "manifest.json" in files:
+                  manifest_path = os.path.join(root, "manifest.json")
+                  ext_name = os.path.basename(root)
+                  safe_ext_name = ext_name.replace(" ", "_")
+                  dest_dir = os.path.join(EXTENSIONS_ROOT, safe_ext_name)
+                  
+                  if os.path.exists(dest_dir):
+                      shutil.rmtree(dest_dir)
+                  shutil.copytree(root, dest_dir)
+                  
+                  # Remove existing key.pem inside the folder
+                  pem_path = os.path.join(dest_dir, "key.pem")
+                  if os.path.exists(pem_path):
+                      os.remove(pem_path)
+                      
+                  # Generate RSA Key
+                  private_key = rsa.generate_private_key(
+                      public_exponent=65537,
+                      key_size=2048,
+                  )
+                  pub_key_der = private_key.public_key().public_bytes(
+                      encoding=serialization.Encoding.DER,
+                      format=serialization.PublicFormat.SubjectPublicKeyInfo
+                  )
+                  
+                  # Calculate Extension ID
+                  sha256 = hashlib.sha256(pub_key_der).digest()
+                  ext_id = ""
+                  for i in range(16):
+                      ext_id += chr((sha256[i] >> 4) + ord('a'))
+                      ext_id += chr((sha256[i] & 0x0F) + ord('a'))
+                      
+                  # Inject key into manifest
+                  with open(manifest_path, 'r', encoding='utf-8') as f:
+                      manifest = json.load(f)
+                  pub_key_b64 = base64.b64encode(pub_key_der).decode('utf-8')
+                  manifest['key'] = pub_key_b64
+                  with open(os.path.join(dest_dir, 'manifest.json'), 'w', encoding='utf-8') as f:
+                      json.dump(manifest, f, indent=4)
+                      
+                  # Save private key OUTSIDE the extension dir
+                  ext_pem_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}.pem")
+                  pem = private_key.private_bytes(
+                      encoding=serialization.Encoding.PEM,
+                      format=serialization.PrivateFormat.PKCS8,
+                      encryption_algorithm=serialization.NoEncryption()
+                  )
+                  with open(ext_pem_path, 'wb') as f:
+                      f.write(pem)
+                      
+                  # Pack into CRX3 natively via Python
+                  crx_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}.crx")
+                  create_crx(dest_dir, ext_pem_path, crx_path)
+                  
+                  extensions.append({
+                      "id": ext_id,
+                      "crx_file": f"{safe_ext_name}.crx",
+                      "version": manifest.get("version", "1.0"),
+                      "dest_dir": dest_dir.replace('\\', '/')
+                  })
+                  print(f"Packed {safe_ext_name}.crx (ID: {ext_id})")
 
-              # Pack into CRX
-              & $chromePath --pack-extension="$destDir" --pack-extension-key="$pemPath"
-              Start-Sleep -Seconds 2
+          # Generate update.xml
+          xml = ['<?xml version="1.0" encoding="UTF-8"?>']
+          xml.append('<gupdate xmlns="http://www.google.com/update2/response" protocol="2.0">')
+          for ext in extensions:
+              xml.append(f'  <app appid="{ext["id"]}">')
+              xml.append(f'    <updatecheck codebase="http://localhost:8198/{ext["crx_file"]}" version="{ext["version"]}" />')
+              xml.append('  </app>')
+          xml.append('</gupdate>')
 
-              $crxPath = Join-Path $extensionsRoot "$safeExtName.crx"
-              if (Test-Path $crxPath) {
-                  $packedExtensions += @{
-                      Id      = $id
-                      CrxPath = $crxPath
-                      CrxFile = "$safeExtName.crx"
-                      Version = $manifestObj.version
-                      DestDir = $destDir
-                  }
-                  Write-Host "✅ Packed: $safeExtName.crx (ID: $id)" -ForegroundColor Green
-              } else {
-                  Write-Warning "Failed to pack $safeExtName."
-              }
-          }
+          with open(os.path.join(EXTENSIONS_ROOT, "update.xml"), 'w', encoding='utf-8') as f:
+              f.write("\n".join(xml))
+
+          print("---EXTENSIONS_JSON_START---")
+          print(json.dumps(extensions))
+          print("---EXTENSIONS_JSON_END---")
+          '@
+          Set-Content -Path $pyScriptPath -Value $pyScript -Encoding UTF8
+
+          # ── Execute Python Script ──
+          Write-Host "🐍 Executing Python CRX Packager..." -ForegroundColor Cyan
+          $pyOutput = & python $pyScriptPath 2>&1 | Out-String
+          Write-Host $pyOutput
+
+          # Extract JSON Payload
+          $jsonStart = $pyOutput.IndexOf("---EXTENSIONS_JSON_START---")
+          $jsonEnd = $pyOutput.IndexOf("---EXTENSIONS_JSON_END---")
+          if ($jsonStart -eq -1 -or $jsonEnd -eq -1) { throw "Failed to parse Python script output." }
+          
+          $jsonStr = $pyOutput.Substring($jsonStart + 28, $jsonEnd - ($jsonStart + 28)).Trim()
+          $packedExtensions = $jsonStr | ConvertFrom-Json
 
           if ($packedExtensions.Count -eq 0) { throw "No extensions successfully packed." }
-
-          # Create local update.xml manifest
-          $xmlBuilder = [System.Text.StringBuilder]::new()
-          [void]$xmlBuilder.AppendLine("<?xml version='1.0' encoding='UTF-8'?>")
-          [void]$xmlBuilder.AppendLine("<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>")
-          foreach ($ext in $packedExtensions) {
-              [void]$xmlBuilder.AppendLine("  <app appid='$($ext.Id)'>")
-              [void]$xmlBuilder.AppendLine("    <updatecheck codebase='http://localhost:8198/$($ext.CrxFile)' version='$($ext.Version)' />")
-              [void]$xmlBuilder.AppendLine("  </app>")
-          }
-          [void]$xmlBuilder.AppendLine("</gupdate>")
-          
-          $updateXmlPath = Join-Path $extensionsRoot "update.xml"
-          Set-Content -Path $updateXmlPath -Value $xmlBuilder.ToString() -Encoding UTF8 -Force
 
           # ── START MICRO HTTP SERVER ──
           $httpScript = @"
@@ -324,11 +361,12 @@ jobs:
               }
           } catch {}
           "@
-          Set-Content -Path $httpServerPath -Value $httpScript -Encoding UTF8 -Force
+          Set-Content -Path $httpServerPath -Value $httpScript -Encoding UTF8
           Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$httpServerPath`"" -WindowStyle Hidden
           Write-Host "✅ Micro HTTP Server started on port 8198." -ForegroundColor Green
 
           # Parse Bookmarks
+          $extractPath = Join-Path $fabricRoot "Extracted"
           $htmlFile = Get-ChildItem -Path $extractPath -Filter "*.html" -File -Recurse | Select-Object -First 1
           $bookmarkObjects = @(@{ toplevel_name = "RDP Fabric" })
           if ($htmlFile) {
@@ -348,7 +386,7 @@ jobs:
           New-Item -Path $forceListPath -Force | Out-Null
           $index = 1
           foreach ($ext in $packedExtensions) {
-              $forceValue = "$($ext.Id);http://localhost:8198/update.xml"
+              $forceValue = "$($ext.id);http://localhost:8198/update.xml"
               New-ItemProperty -Path $forceListPath -Name "$index" -PropertyType String -Value $forceValue -Force | Out-Null
               $index++
           }
@@ -374,7 +412,7 @@ jobs:
           Set-Acl -Path $chromeUserRoot -AclObject $chromeAcl
 
           # ── Create Bootstrap Script with --load-extension Fallback ──
-          $extDirs = ($packedExtensions | ForEach-Object { $_.DestDir }) -join ','
+          $extDirs = ($packedExtensions | ForEach-Object { $_.dest_dir }) -join ','
           
           $bootstrapScript = @"
           `$ErrorActionPreference = 'Continue'
@@ -382,7 +420,9 @@ jobs:
           New-Item -ItemType Directory -Path (Split-Path `$logPath) -Force | Out-Null
           
           try {
-              `$chromePath = "$chromePath"
+              `$chromePath = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+              if (-not (Test-Path `$chromePath)) { `$chromePath = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe" }
+              
               `$shell = New-Object -ComObject WScript.Shell
               `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
               `$shortcut.TargetPath = `$chromePath
@@ -400,7 +440,7 @@ jobs:
               Add-Content -Path `$logPath -Value "ERROR: `$(`$_.Exception.Message)"
           }
           "@
-          Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8 -Force
+          Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8
 
           # Schedule Chrome to open on Login
           $taskName = "RDPFabric-ChromeBootstrap"
