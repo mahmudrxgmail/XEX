@@ -1,14 +1,14 @@
 name: "RDP Fabric (Pure Tailscale)"
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TAILSCALE RDP FABRIC — Flagship Architecture
+#  TAILSCALE RDP FABRIC — Flagship Architecture
 # ═══════════════════════════════════════════════════════════════════════════
-#  ⚡ Pure Tailscale Architecture (Zero CRD/RustDesk cruft)
-#  ⚡ Ephemeral Nodes (Auto-purges from Tailnet on exit — No API needed)
-#  ⚡ Native GH CLI Handoff (Failsafe recursive cycle dispatch)
-#  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
-#  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
-#  ⚡ Zero-Touch Chrome CRX Automation (Extensions, Bookmarks & Startup URL)
+#  ⚡ Pure Tailscale Architecture (Zero CRD/RustDesk cruft)
+#  ⚡ Ephemeral Nodes (Auto-purges from Tailnet on exit — No API needed)
+#  ⚡ Native GH CLI Handoff (Failsafe recursive cycle dispatch)
+#  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
+#  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
+#  ⚡ Zero-Touch Chrome CRX Automation (HTTP Server + Policy + Bootstrap Fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -21,9 +21,9 @@ on:
         type: choice
         options: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
       runtime_minutes:
-        description: "Session duration in minutes (max 355)"
+        description: "Session duration in minutes (max 345)"
         required: true
-        default: "355"
+        default: "345"
       cycles:
         description: "Number of automated respawn cycles left (0 = stop)"
         required: false
@@ -87,10 +87,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Write-Host "🚀 INITIALIZING TAILSCALE FABRIC..." -ForegroundColor Cyan
 
-          # Calculate Runtime
+          # Calculate Runtime (Capped at 345 to allow 15 mins for safe handoff)
           $runtime = [int]"${{ inputs.runtime_minutes }}"
           if ("${{ inputs.quick_test }}" -eq "true") { $runtime = 5 }
-          if ($runtime -gt 355) { $runtime = 355 }
+          if ($runtime -gt 345) { $runtime = 345 }
           "SESSION_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
 
           # Windows Power & Sleep Demolition
@@ -99,30 +99,22 @@ jobs:
           powercfg /hibernate off
           powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c # High Performance
 
-          # Defender Mitigation (Prevents CPU spikes during RDP)
+          # Defender Mitigation
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
 
-          # ── PREMIUM EXPERIENCE: RDP GRAPHICS & LATENCY OVERHAUL ──
-          Write-Host "✨ Injecting Premium Graphics & Latency Protocols..." -ForegroundColor Magenta
-          
-          # 1. System Timer Overclock (0.5ms) for ultra-low input latency
+          # RDP GRAPHICS & LATENCY OVERHAUL
           $TimerCode = 'using System; using System.Runtime.InteropServices; public class TimerRes { [DllImport("ntdll.dll", SetLastError = true)] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution); }'
           Add-Type -TypeDefinition $TimerCode
           [TimerRes]::NtSetTimerResolution(5000, $true, [ref]0) | Out-Null
           
-          # 2. Force H.264 / AVC 444 encoding (Buttery smooth scrolling, low bandwidth)
           $tsPolicies = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (-not (Test-Path $tsPolicies)) { New-Item -Path $tsPolicies -Force | Out-Null }
           Set-ItemProperty -Path $tsPolicies -Name "fEnableH264" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPolicies -Name "fEnableH264444" -Value 1 -Type DWord -Force
-          
-          # 3. Prioritize Framerate (1) over Image Quality (2)
           Set-ItemProperty -Path $tsPolicies -Name "RemoteDesktopProfile" -Value 1 -Type DWord -Force
-          
-          # 4. Disable heavy visual effects for new users (Improves software rendering speed)
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue
 
-          # Network Demolition (Nagle's Algorithm off, TCP CUBIC)
+          # Network Demolition
           $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
           foreach ($iface in $interfaces) {
               Set-ItemProperty -Path $iface.PSPath -Name "TcpAckFrequency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -140,7 +132,7 @@ jobs:
           # Enable RDP & UDP Transport
           $tsCtrl = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
           Set-ItemProperty -Path $tsCtrl -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fClientDisableUDP" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $tsPolicies -Name "fClientDisableUDP" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           
           Write-Host "✅ OS Layer Optimized. RDP Ready." -ForegroundColor Green
@@ -151,7 +143,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if (-not $env:TS_AUTHKEY) { Write-Error "CRITICAL: TAILSCALE_AUTH_KEY secret is missing."; exit 1 }
 
-          Write-Host "📥 Downloading Tailscale (Native IWR with Resilience)..." -ForegroundColor Cyan
+          Write-Host "📥 Downloading Tailscale..." -ForegroundColor Cyan
           $installer = "$env:TEMP\tailscale.msi"
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
           $maxRetries = 5
@@ -162,33 +154,20 @@ jobs:
               try {
                   Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
                   $success = $true
-                  Write-Host "✅ Download successful." -ForegroundColor Green
               } catch {
                   $retryCount++
-                  Write-Warning "Download timeout (Attempt $retryCount of $maxRetries). Retrying in 5 seconds..."
                   Start-Sleep -Seconds 5
               }
           }
-
-          if (-not $success) {
-              Write-Error "CRITICAL: Failed to download Tailscale after $maxRetries attempts. The Tailscale CDN might be down."
-              exit 1
-          }
+          if (-not $success) { Write-Error "Failed to download Tailscale."; exit 1 }
           
-          Write-Host "⚙️ Installing Tailscale Core..." -ForegroundColor Cyan
           Start-Process msiexec.exe -ArgumentList "/i", $installer, "/quiet", "/norestart" -Wait
-          
           $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsPath)) { Write-Error "Tailscale installation failed."; exit 1 }
 
-          # Construct unique ephemeral hostname
           $hostname = "fabric-node-${env:RUN_ID}-${env:MATRIX_ID}"
-          Write-Host "🔗 Authenticating node: $hostname" -ForegroundColor Yellow
-
-          # Launch Tailscale (Note: Ephemerality is controlled by the Auth Key type!)
           & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$hostname" --accept-routes=false --unattended
           
-          # Await IP Allocation
           $ip = ""; $timeout = 30
           while (-not ($ip -match "^\d{1,3}(\.\d{1,3}){3}$") -and $timeout -gt 0) {
               Start-Sleep -Seconds 1
@@ -199,22 +178,16 @@ jobs:
           
           "TS_IP=$ip" | Out-File -Append $env:GITHUB_ENV
           "TS_HOSTNAME=$hostname" | Out-File -Append $env:GITHUB_ENV
-          Write-Host "✅ Node attached. IP: $ip" -ForegroundColor Green
           
-          # Premium Experience: Tune Tailscale MTU to eliminate VPN micro-stutters
           $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" -or $_.Name -match "Tailscale" } | Select-Object -First 1
-          if ($tsAdapter) {
-              netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null
-              Write-Host "✨ Tailscale MTU optimized for ultra-low latency." -ForegroundColor Magenta
-          }
+          if ($tsAdapter) { netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null }
 
       # ── 2.5. CHROME CRX PACKAGING & POLICY INJECTION ─────────────────────────
-      - name: "🧩 Phase 2.5: CRX Packaging & Enterprise Policy Injection"
+      - name: "🧩 Phase 2.5: CRX Packaging, Micro HTTP Server & Policy Injection"
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "🧩 Auto-Injecting Custom Extensions (CRX Method), Bookmarks & Startup URL..." -ForegroundColor Cyan
+          Write-Host "🧩 Auto-Injecting Custom Extensions via Micro HTTP Server..." -ForegroundColor Cyan
 
-          # ── Configuration ───────────────────────────────────────────────────
           $customZipUrl = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
           $startupUrl = "https://fabric-x-xi.vercel.app/"
           
@@ -223,37 +196,20 @@ jobs:
           $extractPath = Join-Path $fabricRoot "Extracted"
           $extensionsRoot = Join-Path $fabricRoot "Extensions"
           $bootstrapPath = Join-Path $fabricRoot "ChromeBootstrap.ps1"
+          $httpServerPath = Join-Path $fabricRoot "HttpServer.ps1"
 
           New-Item -ItemType Directory -Path $fabricRoot -Force | Out-Null
           New-Item -ItemType Directory -Path $extensionsRoot -Force | Out-Null
 
-          # ── Download ZIP ──────────────────────────────────────────────────
-          Write-Host "📥 Downloading CustomProfile.zip..." -ForegroundColor Cyan
-          $downloaded = $false
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-              try {
-                  Invoke-WebRequest -Uri $customZipUrl -OutFile $zipPath -UseBasicParsing
-                  if ((Test-Path $zipPath) -and ((Get-Item $zipPath).Length -gt 0)) {
-                      $downloaded = $true
-                      break
-                  }
-              } catch {
-                  Write-Warning "Download attempt $attempt failed: $($_.Exception.Message)"
-                  Start-Sleep -Seconds 5
-              }
-          }
-          if (-not $downloaded) { throw "Failed to download CustomProfile.zip after 5 attempts." }
-
+          # Download & Extract
+          Invoke-WebRequest -Uri $customZipUrl -OutFile $zipPath -UseBasicParsing
           Unblock-File -Path $zipPath -ErrorAction SilentlyContinue
-
-          # ── Extract and Process Contents ───────────────────────────────────
           Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-          
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
 
-          # 1. Locate Chrome Executable for packing
+          # Locate Chrome
           $chromeCandidates = @(
               "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
               "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
@@ -262,15 +218,13 @@ jobs:
           $chromePath = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $chromePath) { throw "Google Chrome is not installed." }
 
-          # 2. Locate Extensions and Pack them into CRX
+          # Pack Extensions
           $manifestFiles = Get-ChildItem -Path $extractPath -Filter "manifest.json" -File -Recurse
           $packedExtensions = @()
 
           foreach ($manifest in $manifestFiles) {
               $extDir = $manifest.DirectoryName
               $extName = Split-Path $extDir -Leaf
-              
-              # Sanitize folder name
               $safeExtName = $extName -replace '\s', '_'
               $destDir = Join-Path $extensionsRoot $safeExtName
               
@@ -278,21 +232,21 @@ jobs:
               New-Item -ItemType Directory -Path $destDir -Force | Out-Null
               Copy-Item -Path (Join-Path $extDir "*") -Destination $destDir -Recurse -Force
               
-              # Generate RSA Keypair for static Extension ID
+              # Generate RSA Keypair
               $rsa = [System.Security.Cryptography.RSA]::Create(2048)
               $pubKeyDer = $rsa.ExportSubjectPublicKeyInfo()
               $privKeyDer = $rsa.ExportPkcs8PrivateKey()
 
-              # Calculate Chrome Extension ID
+              # Calculate Chrome Extension ID Safely
               $sha256 = [System.Security.Cryptography.SHA256]::Create()
               $hash = $sha256.ComputeHash($pubKeyDer)
-              $id = ""
-              for ($i = 0; $i -lt 16; $i++) {
-                  $id += [char](($hash[$i] -shr 4) -band 0x0F + 0x61)
-                  $id += [char]($hash[$i] -band 0x0F + 0x61)
-              }
+              $id = -join ($hash | Select-Object -First 16 | ForEach-Object {
+                  $c1 = [char](($_ -shr 4) + [int][char]'a')
+                  $c2 = [char](($_ -band 0x0F) + [int][char]'a')
+                  "$c1$c2"
+              })
 
-              # Save Private Key to PEM
+              # Save Private Key
               $b64 = [Convert]::ToBase64String($privKeyDer)
               $pem = "-----BEGIN PRIVATE KEY-----`n"
               for ($i = 0; $i -lt $b64.Length; $i += 64) { $pem += $b64.Substring($i, [Math]::Min(64, $b64.Length - $i)) + "`n" }
@@ -300,7 +254,7 @@ jobs:
               $pemPath = Join-Path $destDir "key.pem"
               Set-Content -Path $pemPath -Value $pem -Encoding ASCII -Force
 
-              # Inject "key" into manifest.json to force static ID
+              # Inject "key" into manifest
               $manifestPath = Join-Path $destDir "manifest.json"
               $manifestObj = Get-Content $manifestPath -Raw | ConvertFrom-Json
               $pubKeyB64 = [Convert]::ToBase64String($pubKeyDer)
@@ -308,80 +262,101 @@ jobs:
               else { $manifestObj | Add-Member -NotePropertyName "key" -NotePropertyValue $pubKeyB64 }
               $manifestObj | ConvertTo-Json -Depth 10 | Set-Content $manifestPath -Encoding UTF8 -Force
 
-              # Pack into CRX
-              Write-Host "📦 Packing $safeExtName into CRX (ID: $id)..." -ForegroundColor Cyan
+              # Pack into CRX (Removed invalid --no-message-box flag)
+              & $chromePath --pack-extension="$destDir" --pack-extension-key="$pemPath"
+              Start-Sleep -Seconds 2
+
               $crxPath = Join-Path $extensionsRoot "$safeExtName.crx"
-              & $chromePath --pack-extension="$destDir" --pack-extension-key="$pemPath" --no-message-box
-              Start-Sleep -Seconds 2 # wait for chrome to finish
-
-              $packedExtensions += @{
-                  Id      = $id
-                  CrxPath = $crxPath
-                  Version = $manifestObj.version
+              if (Test-Path $crxPath) {
+                  $packedExtensions += @{
+                      Id      = $id
+                      CrxPath = $crxPath
+                      CrxFile = "$safeExtName.crx"
+                      Version = $manifestObj.version
+                      DestDir = $destDir
+                  }
+                  Write-Host "✅ Packed: $safeExtName.crx (ID: $id)" -ForegroundColor Green
               }
-              Write-Host "✅ Packed: $safeExtName.crx" -ForegroundColor Green
           }
 
-          if ($packedExtensions.Count -eq 0) {
-              throw "No Chrome extensions (manifest.json) found in the ZIP."
-          }
+          if ($packedExtensions.Count -eq 0) { throw "No extensions found." }
 
-          # 3. Create local update.xml manifest
+          # Create local update.xml manifest
           $xmlBuilder = [System.Text.StringBuilder]::new()
           [void]$xmlBuilder.AppendLine("<?xml version='1.0' encoding='UTF-8'?>")
           [void]$xmlBuilder.AppendLine("<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>")
-          
           foreach ($ext in $packedExtensions) {
-              $crxUri = "file:///" + ($ext.CrxPath -replace '\\', '/')
               [void]$xmlBuilder.AppendLine("  <app appid='$($ext.Id)'>")
-              [void]$xmlBuilder.AppendLine("    <updatecheck codebase='$crxUri' version='$($ext.Version)' />")
+              [void]$xmlBuilder.AppendLine("    <updatecheck codebase='http://localhost:8198/$($ext.CrxFile)' version='$($ext.Version)' />")
               [void]$xmlBuilder.AppendLine("  </app>")
           }
           [void]$xmlBuilder.AppendLine("</gupdate>")
           
           $updateXmlPath = Join-Path $extensionsRoot "update.xml"
           Set-Content -Path $updateXmlPath -Value $xmlBuilder.ToString() -Encoding UTF8 -Force
-          $updateXmlUri = "file:///" + ($updateXmlPath -replace '\\', '/')
 
-          # 4. Auto-Parse Bookmarks HTML to JSON for Enterprise Policy
+          # ── START MICRO HTTP SERVER ──
+          # Chrome blocks file:// URIs in policies. We must serve via http://localhost
+          $httpScript = @"
+          `$root = '$extensionsRoot'
+          `$listener = New-Object System.Net.HttpListener
+          `$listener.Prefixes.Add('http://localhost:8198/')
+          try {
+              `$listener.Start()
+              while (`$listener.IsListening) {
+                  `$context = `$listener.GetContext()
+                  `$file = Join-Path `$root `$context.Request.Url.LocalPath.TrimStart('/')
+                  if (Test-Path `$file -PathType Leaf) {
+                      if (`$file -like '*.xml') { `$context.Response.ContentType = 'application/xml' }
+                      elseif (`$file -like '*.crx') { `$context.Response.ContentType = 'application/x-chrome-extension' }
+                      `$bytes = [System.IO.File]::ReadAllBytes(`$file)
+                      `$context.Response.ContentLength64 = `$bytes.Length
+                      `$context.Response.OutputStream.Write(`$bytes, 0, `$bytes.Length)
+                  } else {
+                      `$context.Response.StatusCode = 404
+                  }
+                  `$context.Response.Close()
+              }
+          } catch {}
+          "@
+          Set-Content -Path $httpServerPath -Value $httpScript -Encoding UTF8 -Force
+          Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$httpServerPath`"" -WindowStyle Hidden
+          Write-Host "✅ Micro HTTP Server started on port 8198." -ForegroundColor Green
+
+          # Parse Bookmarks
           $htmlFile = Get-ChildItem -Path $extractPath -Filter "*.html" -File -Recurse | Select-Object -First 1
           $bookmarkObjects = @(@{ toplevel_name = "RDP Fabric" })
-
           if ($htmlFile) {
-              Write-Host "📖 Parsing Bookmarks HTML automatically..." -ForegroundColor Cyan
               $htmlContent = Get-Content $htmlFile.FullName -Raw
               $regex = [regex]'<A\s+HREF="([^"]+)"[^>]*>([^<]+)</A>'
               $matches = $regex.Matches($htmlContent)
               foreach ($match in $matches) {
                   $bookmarkObjects += @{ name = $match.Groups[2].Value.Trim(); url = $match.Groups[1].Value }
               }
-              Write-Host "✅ Extracted $($matches.Count) bookmarks." -ForegroundColor Green
           }
 
-          # 5. Inject Policies into Windows Registry
+          # Inject Registry Policies
           $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
           New-Item -Path $chromePolicyPath -Force | Out-Null
-
-          # Force Install Extensions via update.xml
+          
+          # CRITICAL FIX: Format is <id>;<update_url> and numbered keys for multiple extensions
           $forceListPath = "$chromePolicyPath\ExtensionInstallForcelist"
           New-Item -Path $forceListPath -Force | Out-Null
-          New-ItemProperty -Path $forceListPath -Name "1" -PropertyType String -Value $updateXmlUri -Force | Out-Null
+          $index = 1
+          foreach ($ext in $packedExtensions) {
+              $forceValue = "$($ext.Id);http://localhost:8198/update.xml"
+              New-ItemProperty -Path $forceListPath -Name "$index" -PropertyType String -Value $forceValue -Force | Out-Null
+              $index++
+          }
           
-          # Inject Bookmarks
           $bookmarkJson = $bookmarkObjects | ConvertTo-Json -Depth 10 -Compress
           New-ItemProperty -Path $chromePolicyPath -Name "ManagedBookmarks" -PropertyType String -Value $bookmarkJson -Force | Out-Null
-          
-          # Force Bookmark Bar visible
           New-ItemProperty -Path $chromePolicyPath -Name "BookmarkBarEnabled" -PropertyType DWord -Value 1 -Force | Out-Null
-
-          # Force Startup URL
           New-ItemProperty -Path $chromePolicyPath -Name "RestoreOnStartup" -PropertyType DWord -Value 4 -Force | Out-Null
           $startupUrlsJson = "[`"$startupUrl`"]"
           New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
 
-          Write-Host "✅ Enterprise Policies injected (Force-Install, Bookmarks, Startup URL)." -ForegroundColor Green
-
-          # 6. Fix NTFS Permissions
+          # Fix NTFS Permissions
           $acl = Get-Acl $fabricRoot
           $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
           $acl.AddAccessRule($rule)
@@ -393,68 +368,56 @@ jobs:
           $chromeRule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
           $chromeAcl.AddAccessRule($chromeRule)
           Set-Acl -Path $chromeUserRoot -AclObject $chromeAcl
-          Write-Host "✅ NTFS Permissions fixed for FabricAdmin." -ForegroundColor Green
 
-          # ── Create Bootstrap Script ─────────────────────────────────────────
+          # ── Create Bootstrap Script with --load-extension Fallback ──
+          $extDirs = ($packedExtensions | ForEach-Object { $_.DestDir }) -join ','
+          
           $bootstrapScript = @"
-          `$ErrorActionPreference = 'Stop'
-          `$logRoot = Join-Path `$env:LOCALAPPDATA 'RDPFabric'
-          New-Item -ItemType Directory -Path `$logRoot -Force | Out-Null
-          `$logPath = Join-Path `$logRoot 'chrome-bootstrap.log'
+          `$ErrorActionPreference = 'Continue'
+          `$logPath = Join-Path `$env:LOCALAPPDATA 'RDPFabric\chrome-bootstrap.log'
+          New-Item -ItemType Directory -Path (Split-Path `$logPath) -Force | Out-Null
           
           try {
-              Start-Transcript -Path `$logPath -Append | Out-Null
-              
               `$chromePath = "$chromePath"
-              if (-not (Test-Path `$chromePath)) { throw "Google Chrome is not installed." }
-
-              # Create Desktop Shortcut
               `$shell = New-Object -ComObject WScript.Shell
               `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
               `$shortcut.TargetPath = `$chromePath
               `$shortcut.WorkingDirectory = Split-Path `$chromePath
               `$shortcut.IconLocation = "`$chromePath,0"
               `$shortcut.Description = "Launch Chrome with Fabric Custom Extensions"
+              
+              # Fallback: Use --load-extension to bypass Chrome Web Store wait times
+              `$launchArgs = "--new-window $startupUrl --load-extension=$extDirs"
+              `$shortcut.Arguments = `$launchArgs
               `$shortcut.Save()
 
-              # Launch Chrome normally. Policies will handle extensions and startup URL automatically.
-              `$launchArgs = "--new-window $startupUrl"
               Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
           } catch {
               Add-Content -Path `$logPath -Value "ERROR: `$(`$_.Exception.Message)"
-              throw
-          } finally {
-              try { Stop-Transcript | Out-Null } catch {}
           }
           "@
-
           Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8 -Force
 
-          # ── Schedule Chrome to open on Login ───────────────────────────────
+          # Schedule Chrome to open on Login
           $taskName = "RDPFabric-ChromeBootstrap"
           $taskUser = "$env:COMPUTERNAME\$env:RDP_USER"
-
           $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bootstrapPath`""
           $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
           $taskTrigger.Delay = "PT10S" 
-
           $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
           $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
-          Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Description "Launches Custom Chrome Extensions, Bookmarks, and Startup URL." -Force | Out-Null
-
-          Write-Host "✅ Full Chrome CRX automation successfully provisioned." -ForegroundColor Green
+          Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+          Write-Host "✅ Chrome CRX automation successfully provisioned." -ForegroundColor Green
 
       # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────────
       - name: "📡 Phase 3: Telemetry Dispatch"
         run: |
           if ($env:TG_TOKEN -and $env:TG_CHAT) {
-              Write-Host "📤 Dispatching Telegram Notification..." -ForegroundColor Cyan
               $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min"
               $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
               Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
           } else {
-              Write-Host "ℹ️ Telegram secrets missing. Printing credentials to console instead:"
               Write-Host "=========================================="
               Write-Host " CONNECT VIA RDP"
               Write-Host " IP:   $env:TS_IP"
@@ -465,29 +428,23 @@ jobs:
       # ── 4. SUSTAIN & CYCLE HANDOFF ─────────────────────────────────────────
       - name: "⏳ Phase 4: Session Hold & Cycle Handoff"
         env:
-          # Use GH_PAT if it exists, otherwise fallback to the default github.token
           GH_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
         run: |
           $ErrorActionPreference = 'Continue'
           $minutes = [int]$env:SESSION_MINUTES
           Write-Host "🛡️ Holding session for $minutes minutes..." -ForegroundColor Cyan
 
-          # Keep-alive loop to prevent GH Action runner stall timeout
           $start = Get-Date
           while ((New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes -lt $minutes) {
-              Start-Sleep -Seconds 300 # Pulse every 5 mins
+              Start-Sleep -Seconds 300
               Write-Host "Heartbeat: Node $env:TS_HOSTNAME is active..."
           }
 
-          Write-Host "🏁 Session duration complete." -ForegroundColor Green
-
-          # Failsafe native GitHub CLI recursive dispatch
           $cycles = [int]"${{ inputs.cycles }}"
           if ($cycles -gt 0) {
               $next = $cycles - 1
               Write-Host "🔄 Initiating Cycle Handoff (Remaining: $next)..." -ForegroundColor Yellow
               
-              # Use native pre-installed GH CLI instead of manual REST construction
               gh workflow run "${{ github.workflow }}" `
                 --ref "${{ github.ref_name }}" `
                 -f instance_count="${{ inputs.instance_count }}" `
