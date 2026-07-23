@@ -8,7 +8,7 @@ name: "RDP Fabric (Pure Tailscale)"
 #  ⚡ Native GH CLI Handoff (Failsafe recursive cycle dispatch)
 #  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
 #  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
-#  ⚡ Zero-Touch Chrome Automation (Extensions, Bookmarks & Startup URL)
+#  ⚡ Zero-Touch Chrome CRX Automation (Extensions, Bookmarks & Startup URL)
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -208,11 +208,11 @@ jobs:
               Write-Host "✨ Tailscale MTU optimized for ultra-low latency." -ForegroundColor Magenta
           }
 
-      # ── 2.5. CHROME EXTENSIONS & BOOKMARKS AUTO-INJECTION ─────────────────────
-      - name: "🧩 Phase 2.5: Auto-Inject Extensions, Bookmarks & Startup URL"
+      # ── 2.5. CHROME CRX PACKAGING & POLICY INJECTION ─────────────────────────
+      - name: "🧩 Phase 2.5: CRX Packaging & Enterprise Policy Injection"
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "🧩 Auto-Injecting Custom Extensions, Bookmarks & Startup URL..." -ForegroundColor Cyan
+          Write-Host "🧩 Auto-Injecting Custom Extensions (CRX Method), Bookmarks & Startup URL..." -ForegroundColor Cyan
 
           # ── Configuration ───────────────────────────────────────────────────
           $customZipUrl = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
@@ -244,26 +244,33 @@ jobs:
           }
           if (-not $downloaded) { throw "Failed to download CustomProfile.zip after 5 attempts." }
 
-          # Unblock the ZIP to prevent Windows from marking it as risky
           Unblock-File -Path $zipPath -ErrorAction SilentlyContinue
 
           # ── Extract and Process Contents ───────────────────────────────────
           Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
           
-          # Use System.IO.Compression for bulletproof extraction
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
 
-          # 1. Locate Extensions (Find all manifest.json files)
+          # 1. Locate Chrome Executable for packing
+          $chromeCandidates = @(
+              "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+              "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+              "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+          )
+          $chromePath = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $chromePath) { throw "Google Chrome is not installed." }
+
+          # 2. Locate Extensions and Pack them into CRX
           $manifestFiles = Get-ChildItem -Path $extractPath -Filter "manifest.json" -File -Recurse
-          $extPaths = @()
+          $packedExtensions = @()
 
           foreach ($manifest in $manifestFiles) {
               $extDir = $manifest.DirectoryName
               $extName = Split-Path $extDir -Leaf
               
-              # Chrome --load-extension fails if paths have spaces. Sanitize folder name.
+              # Sanitize folder name
               $safeExtName = $extName -replace '\s', '_'
               $destDir = Join-Path $extensionsRoot $safeExtName
               
@@ -271,85 +278,124 @@ jobs:
               New-Item -ItemType Directory -Path $destDir -Force | Out-Null
               Copy-Item -Path (Join-Path $extDir "*") -Destination $destDir -Recurse -Force
               
-              $extPaths += $destDir
-              Write-Host "✅ Prepared Extension: $safeExtName at $destDir" -ForegroundColor Green
+              # Generate RSA Keypair for static Extension ID
+              $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+              $pubKeyDer = $rsa.ExportSubjectPublicKeyInfo()
+              $privKeyDer = $rsa.ExportPkcs8PrivateKey()
+
+              # Calculate Chrome Extension ID
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $hash = $sha256.ComputeHash($pubKeyDer)
+              $id = ""
+              for ($i = 0; $i -lt 16; $i++) {
+                  $id += [char](($hash[$i] -shr 4) -band 0x0F + 0x61)
+                  $id += [char]($hash[$i] -band 0x0F + 0x61)
+              }
+
+              # Save Private Key to PEM
+              $b64 = [Convert]::ToBase64String($privKeyDer)
+              $pem = "-----BEGIN PRIVATE KEY-----`n"
+              for ($i = 0; $i -lt $b64.Length; $i += 64) { $pem += $b64.Substring($i, [Math]::Min(64, $b64.Length - $i)) + "`n" }
+              $pem += "-----END PRIVATE KEY-----"
+              $pemPath = Join-Path $destDir "key.pem"
+              Set-Content -Path $pemPath -Value $pem -Encoding ASCII -Force
+
+              # Inject "key" into manifest.json to force static ID
+              $manifestPath = Join-Path $destDir "manifest.json"
+              $manifestObj = Get-Content $manifestPath -Raw | ConvertFrom-Json
+              $pubKeyB64 = [Convert]::ToBase64String($pubKeyDer)
+              if ($null -ne $manifestObj.key) { $manifestObj.key = $pubKeyB64 }
+              else { $manifestObj | Add-Member -NotePropertyName "key" -NotePropertyValue $pubKeyB64 }
+              $manifestObj | ConvertTo-Json -Depth 10 | Set-Content $manifestPath -Encoding UTF8 -Force
+
+              # Pack into CRX
+              Write-Host "📦 Packing $safeExtName into CRX (ID: $id)..." -ForegroundColor Cyan
+              $crxPath = Join-Path $extensionsRoot "$safeExtName.crx"
+              & $chromePath --pack-extension="$destDir" --pack-extension-key="$pemPath" --no-message-box
+              Start-Sleep -Seconds 2 # wait for chrome to finish
+
+              $packedExtensions += @{
+                  Id      = $id
+                  CrxPath = $crxPath
+                  Version = $manifestObj.version
+              }
+              Write-Host "✅ Packed: $safeExtName.crx" -ForegroundColor Green
           }
 
-          if ($extPaths.Count -eq 0) {
+          if ($packedExtensions.Count -eq 0) {
               throw "No Chrome extensions (manifest.json) found in the ZIP."
           }
 
-          # 2. Auto-Parse Bookmarks HTML to JSON for Enterprise Policy
+          # 3. Create local update.xml manifest
+          $xmlBuilder = [System.Text.StringBuilder]::new()
+          [void]$xmlBuilder.AppendLine("<?xml version='1.0' encoding='UTF-8'?>")
+          [void]$xmlBuilder.AppendLine("<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>")
+          
+          foreach ($ext in $packedExtensions) {
+              $crxUri = "file:///" + ($ext.CrxPath -replace '\\', '/')
+              [void]$xmlBuilder.AppendLine("  <app appid='$($ext.Id)'>")
+              [void]$xmlBuilder.AppendLine("    <updatecheck codebase='$crxUri' version='$($ext.Version)' />")
+              [void]$xmlBuilder.AppendLine("  </app>")
+          }
+          [void]$xmlBuilder.AppendLine("</gupdate>")
+          
+          $updateXmlPath = Join-Path $extensionsRoot "update.xml"
+          Set-Content -Path $updateXmlPath -Value $xmlBuilder.ToString() -Encoding UTF8 -Force
+          $updateXmlUri = "file:///" + ($updateXmlPath -replace '\\', '/')
+
+          # 4. Auto-Parse Bookmarks HTML to JSON for Enterprise Policy
           $htmlFile = Get-ChildItem -Path $extractPath -Filter "*.html" -File -Recurse | Select-Object -First 1
-          $bookmarkObjects = @(
-              @{ toplevel_name = "RDP Fabric" }
-          )
+          $bookmarkObjects = @(@{ toplevel_name = "RDP Fabric" })
 
           if ($htmlFile) {
               Write-Host "📖 Parsing Bookmarks HTML automatically..." -ForegroundColor Cyan
               $htmlContent = Get-Content $htmlFile.FullName -Raw
-              
-              # Regex matches standard Chrome HTML bookmark exports
               $regex = [regex]'<A\s+HREF="([^"]+)"[^>]*>([^<]+)</A>'
               $matches = $regex.Matches($htmlContent)
-              
               foreach ($match in $matches) {
-                  $url = $match.Groups[1].Value
-                  $name = $match.Groups[2].Value.Trim()
-                  $bookmarkObjects += @{ name = $name; url = $url }
+                  $bookmarkObjects += @{ name = $match.Groups[2].Value.Trim(); url = $match.Groups[1].Value }
               }
-              Write-Host "✅ Extracted $($matches.Count) bookmarks and converted to native Chrome format." -ForegroundColor Green
-          } else {
-              Write-Warning "No bookmarks HTML file found in the ZIP."
+              Write-Host "✅ Extracted $($matches.Count) bookmarks." -ForegroundColor Green
           }
 
-          # 3. Inject Bookmarks, Startup URL & Policies into Windows Registry
+          # 5. Inject Policies into Windows Registry
           $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
           New-Item -Path $chromePolicyPath -Force | Out-Null
 
+          # Force Install Extensions via update.xml
+          $forceListPath = "$chromePolicyPath\ExtensionInstallForcelist"
+          New-Item -Path $forceListPath -Force | Out-Null
+          New-ItemProperty -Path $forceListPath -Name "1" -PropertyType String -Value $updateXmlUri -Force | Out-Null
+          
           # Inject Bookmarks
           $bookmarkJson = $bookmarkObjects | ConvertTo-Json -Depth 10 -Compress
           New-ItemProperty -Path $chromePolicyPath -Name "ManagedBookmarks" -PropertyType String -Value $bookmarkJson -Force | Out-Null
           
-          # Force Bookmark Bar to be visible automatically
+          # Force Bookmark Bar visible
           New-ItemProperty -Path $chromePolicyPath -Name "BookmarkBarEnabled" -PropertyType DWord -Value 1 -Force | Out-Null
 
-          # Force Chrome to open the specific startup URL automatically
+          # Force Startup URL
           New-ItemProperty -Path $chromePolicyPath -Name "RestoreOnStartup" -PropertyType DWord -Value 4 -Force | Out-Null
           $startupUrlsJson = "[`"$startupUrl`"]"
           New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
 
-          Write-Host "✅ Bookmarks, Bookmark Bar, and Startup URL injected into Registry." -ForegroundColor Green
+          Write-Host "✅ Enterprise Policies injected (Force-Install, Bookmarks, Startup URL)." -ForegroundColor Green
 
-          # 4. CRITICAL: Pre-seed Chrome Preferences to force Developer Mode ON
-          # Chrome blocks unpacked extensions via --load-extension if Dev Mode is off.
-          $chromeUserDataDir = "C:\Users\$env:RDP_USER\AppData\Local\Google\Chrome\User Data\Default"
-          New-Item -ItemType Directory -Path $chromeUserDataDir -Force | Out-Null
-          $prefsPath = Join-Path $chromeUserDataDir "Preferences"
-          
-          $prefsJson = '{"extensions":{"ui":{"developer_mode":true}}}'
-          Set-Content -Path $prefsPath -Value $prefsJson -Encoding UTF8 -Force
-          Write-Host "✅ Chrome Developer Mode forced ON in Preferences." -ForegroundColor Green
-
-          # 5. Fix NTFS Permissions
-          # The GitHub Action runs as SYSTEM. FabricAdmin needs explicit Read/Execute access to load the extensions!
+          # 6. Fix NTFS Permissions
           $acl = Get-Acl $fabricRoot
           $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
           $acl.AddAccessRule($rule)
           Set-Acl -Path $fabricRoot -AclObject $acl
           
-          # Also fix ACL for Chrome User Data so FabricAdmin can write to it
           $chromeUserRoot = "C:\Users\$env:RDP_USER\AppData\Local\Google\Chrome\User Data"
+          if (-not (Test-Path $chromeUserRoot)) { New-Item -ItemType Directory -Path $chromeUserRoot -Force | Out-Null }
           $chromeAcl = Get-Acl $chromeUserRoot
           $chromeRule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
           $chromeAcl.AddAccessRule($chromeRule)
           Set-Acl -Path $chromeUserRoot -AclObject $chromeAcl
-          
           Write-Host "✅ NTFS Permissions fixed for FabricAdmin." -ForegroundColor Green
 
           # ── Create Bootstrap Script ─────────────────────────────────────────
-          $extArg = $extPaths -join ','
-
           $bootstrapScript = @"
           `$ErrorActionPreference = 'Stop'
           `$logRoot = Join-Path `$env:LOCALAPPDATA 'RDPFabric'
@@ -359,26 +405,20 @@ jobs:
           try {
               Start-Transcript -Path `$logPath -Append | Out-Null
               
-              `$chromeCandidates = @(
-                  "`${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
-                  "`${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-                  "`$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-              )
-              `$chromePath = `$chromeCandidates | Where-Object { Test-Path `$_ } | Select-Object -First 1
-              if (-not `$chromePath) { throw "Google Chrome is not installed." }
+              `$chromePath = "$chromePath"
+              if (-not (Test-Path `$chromePath)) { throw "Google Chrome is not installed." }
 
               # Create Desktop Shortcut
               `$shell = New-Object -ComObject WScript.Shell
               `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
               `$shortcut.TargetPath = `$chromePath
-              `$shortcut.Arguments = "--load-extension=$extArg"
               `$shortcut.WorkingDirectory = Split-Path `$chromePath
               `$shortcut.IconLocation = "`$chromePath,0"
               `$shortcut.Description = "Launch Chrome with Fabric Custom Extensions"
               `$shortcut.Save()
 
-              # Launch Chrome (The Enterprise Policy will force it to open the Startup URL)
-              `$launchArgs = "--load-extension=$extArg --new-window $startupUrl"
+              # Launch Chrome normally. Policies will handle extensions and startup URL automatically.
+              `$launchArgs = "--new-window $startupUrl"
               Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
           } catch {
               Add-Content -Path `$logPath -Value "ERROR: `$(`$_.Exception.Message)"
@@ -403,7 +443,7 @@ jobs:
 
           Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Description "Launches Custom Chrome Extensions, Bookmarks, and Startup URL." -Force | Out-Null
 
-          Write-Host "✅ Full Chrome automation successfully provisioned." -ForegroundColor Green
+          Write-Host "✅ Full Chrome CRX automation successfully provisioned." -ForegroundColor Green
 
       # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────────
       - name: "📡 Phase 3: Telemetry Dispatch"
