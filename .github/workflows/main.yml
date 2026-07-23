@@ -213,13 +213,11 @@ jobs:
               from cryptography.hazmat.primitives.asymmetric import rsa
               from cryptography.hazmat.primitives import serialization
               import requests
-              from crx3 import create_crx
           except ImportError:
-              subprocess.check_call([sys.executable, "-m", "pip", "install", "cryptography", "crx3", "requests"])
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "cryptography", "requests"])
               from cryptography.hazmat.primitives.asymmetric import rsa
               from cryptography.hazmat.primitives import serialization
               import requests
-              from crx3 import create_crx
 
           ZIP_URL = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
           FABRIC_ROOT = r"C:\ProgramData\RDPFabric"
@@ -242,23 +240,28 @@ jobs:
 
           extensions = []
 
+          chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+          if not os.path.exists(chrome_path):
+              chrome_path = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+
           for root, dirs, files in os.walk(EXTRACT_PATH):
               if "manifest.json" in files:
                   manifest_path = os.path.join(root, "manifest.json")
                   ext_name = os.path.basename(root)
-                  safe_ext_name = ext_name.replace(" ", "_")
+                  safe_ext_name = "".join(c if c.isalnum() else "_" for c in ext_name)
                   dest_dir = os.path.join(EXTENSIONS_ROOT, safe_ext_name)
                   
                   if os.path.exists(dest_dir):
                       shutil.rmtree(dest_dir)
                   shutil.copytree(root, dest_dir)
                   
-                  # Remove existing key.pem inside the folder
-                  pem_path = os.path.join(dest_dir, "key.pem")
-                  if os.path.exists(pem_path):
-                      os.remove(pem_path)
+                  # 1. Delete any existing key.pem inside the folder
+                  pem_in_folder = os.path.join(dest_dir, "key.pem")
+                  if os.path.exists(pem_in_folder):
+                      os.chmod(pem_in_folder, 0o777)
+                      os.remove(pem_in_folder)
                       
-                  # Generate RSA Key
+                  # 2. Generate RSA Key
                   private_key = rsa.generate_private_key(
                       public_exponent=65537,
                       key_size=2048,
@@ -275,7 +278,7 @@ jobs:
                       ext_id += chr((sha256[i] >> 4) + ord('a'))
                       ext_id += chr((sha256[i] & 0x0F) + ord('a'))
                       
-                  # Inject key into manifest
+                  # 3. Inject public key into manifest.json (for --load-extension fallback)
                   with open(manifest_path, 'r', encoding='utf-8') as f:
                       manifest = json.load(f)
                   pub_key_b64 = base64.b64encode(pub_key_der).decode('utf-8')
@@ -283,7 +286,7 @@ jobs:
                   with open(os.path.join(dest_dir, 'manifest.json'), 'w', encoding='utf-8') as f:
                       json.dump(manifest, f, indent=4)
                       
-                  # Save private key OUTSIDE the extension dir
+                  # 4. Save private key OUTSIDE the extension dir
                   ext_pem_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}.pem")
                   pem = private_key.private_bytes(
                       encoding=serialization.Encoding.PEM,
@@ -293,17 +296,49 @@ jobs:
                   with open(ext_pem_path, 'wb') as f:
                       f.write(pem)
                       
-                  # Pack into CRX3 natively via Python
-                  crx_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}.crx")
-                  create_crx(dest_dir, ext_pem_path, crx_path)
+                  # 5. Create a temp dir for packing (Chrome CLI hates 'key' in manifest)
+                  temp_pack_dir = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}_temp")
+                  if os.path.exists(temp_pack_dir):
+                      shutil.rmtree(temp_pack_dir)
+                  shutil.copytree(dest_dir, temp_pack_dir)
                   
-                  extensions.append({
-                      "id": ext_id,
-                      "crx_file": f"{safe_ext_name}.crx",
-                      "version": manifest.get("version", "1.0"),
-                      "dest_dir": dest_dir.replace('\\', '/')
-                  })
-                  print(f"Packed {safe_ext_name}.crx (ID: {ext_id})")
+                  temp_manifest_path = os.path.join(temp_pack_dir, "manifest.json")
+                  with open(temp_manifest_path, 'r', encoding='utf-8') as f:
+                      temp_manifest = json.load(f)
+                  if "key" in temp_manifest:
+                      del temp_manifest["key"]
+                  with open(temp_manifest_path, 'w', encoding='utf-8') as f:
+                      json.dump(temp_manifest, f, indent=4)
+                      
+                  # 6. Pack using Chrome CLI
+                  print(f"Packing {safe_ext_name}...")
+                  subprocess.run([
+                      chrome_path,
+                      "--headless=new",
+                      f"--pack-extension={temp_pack_dir}",
+                      f"--pack-extension-key={ext_pem_path}"
+                  ], capture_output=True, timeout=30)
+                  
+                  crx_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}.crx")
+                  temp_crx_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}_temp.crx")
+                  if os.path.exists(temp_crx_path):
+                      if os.path.exists(crx_path):
+                          os.remove(crx_path)
+                      shutil.move(temp_crx_path, crx_path)
+                  
+                  # Clean up temp dir
+                  shutil.rmtree(temp_pack_dir)
+                  
+                  if os.path.exists(crx_path):
+                      print(f"Success: {safe_ext_name}.crx (ID: {ext_id})")
+                      extensions.append({
+                          "id": ext_id,
+                          "crx_file": f"{safe_ext_name}.crx",
+                          "version": manifest.get("version", "1.0"),
+                          "dest_dir": dest_dir.replace('\\', '/')
+                      })
+                  else:
+                      print(f"Failed to pack {safe_ext_name}")
 
           # Generate update.xml
           xml = ['<?xml version="1.0" encoding="UTF-8"?>']
