@@ -232,6 +232,10 @@ jobs:
               New-Item -ItemType Directory -Path $destDir -Force | Out-Null
               Copy-Item -Path (Join-Path $extDir "*") -Destination $destDir -Recurse -Force
               
+              # CRITICAL FIX: Delete any existing key.pem inside the extension folder
+              $existingPem = Join-Path $destDir "key.pem"
+              if (Test-Path $existingPem) { Remove-Item $existingPem -Force -ErrorAction SilentlyContinue }
+
               # Generate RSA Keypair
               $rsa = [System.Security.Cryptography.RSA]::Create(2048)
               $pubKeyDer = $rsa.ExportSubjectPublicKeyInfo()
@@ -246,12 +250,12 @@ jobs:
                   "$c1$c2"
               })
 
-              # Save Private Key
+              # CRITICAL FIX: Save Private Key OUTSIDE the extension directory
               $b64 = [Convert]::ToBase64String($privKeyDer)
               $pem = "-----BEGIN PRIVATE KEY-----`n"
               for ($i = 0; $i -lt $b64.Length; $i += 64) { $pem += $b64.Substring($i, [Math]::Min(64, $b64.Length - $i)) + "`n" }
               $pem += "-----END PRIVATE KEY-----"
-              $pemPath = Join-Path $destDir "key.pem"
+              $pemPath = Join-Path $extensionsRoot "$safeExtName.pem"
               Set-Content -Path $pemPath -Value $pem -Encoding ASCII -Force
 
               # Inject "key" into manifest
@@ -262,7 +266,7 @@ jobs:
               else { $manifestObj | Add-Member -NotePropertyName "key" -NotePropertyValue $pubKeyB64 }
               $manifestObj | ConvertTo-Json -Depth 10 | Set-Content $manifestPath -Encoding UTF8 -Force
 
-              # Pack into CRX (Removed invalid --no-message-box flag)
+              # Pack into CRX
               & $chromePath --pack-extension="$destDir" --pack-extension-key="$pemPath"
               Start-Sleep -Seconds 2
 
@@ -276,10 +280,12 @@ jobs:
                       DestDir = $destDir
                   }
                   Write-Host "✅ Packed: $safeExtName.crx (ID: $id)" -ForegroundColor Green
+              } else {
+                  Write-Warning "Failed to pack $safeExtName."
               }
           }
 
-          if ($packedExtensions.Count -eq 0) { throw "No extensions found." }
+          if ($packedExtensions.Count -eq 0) { throw "No extensions successfully packed." }
 
           # Create local update.xml manifest
           $xmlBuilder = [System.Text.StringBuilder]::new()
@@ -296,7 +302,6 @@ jobs:
           Set-Content -Path $updateXmlPath -Value $xmlBuilder.ToString() -Encoding UTF8 -Force
 
           # ── START MICRO HTTP SERVER ──
-          # Chrome blocks file:// URIs in policies. We must serve via http://localhost
           $httpScript = @"
           `$root = '$extensionsRoot'
           `$listener = New-Object System.Net.HttpListener
@@ -339,7 +344,6 @@ jobs:
           $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
           New-Item -Path $chromePolicyPath -Force | Out-Null
           
-          # CRITICAL FIX: Format is <id>;<update_url> and numbered keys for multiple extensions
           $forceListPath = "$chromePolicyPath\ExtensionInstallForcelist"
           New-Item -Path $forceListPath -Force | Out-Null
           $index = 1
