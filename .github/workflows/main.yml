@@ -1,14 +1,14 @@
 name: "RDP Fabric (Pure Tailscale)"
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TAILSCALE RDP FABRIC — Flagship Architecture
+#  TAILSCALE RDP FABRIC — Flagship Architecture (High-Performance)
 # ═══════════════════════════════════════════════════════════════════════════
 #  ⚡ Pure Tailscale Architecture (Zero CRD/RustDesk cruft)
 #  ⚡ Ephemeral Nodes (Auto-purges from Tailnet on exit — No API needed)
 #  ⚡ Native GH CLI Handoff (Failsafe recursive cycle dispatch)
 #  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
 #  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
-#  ⚡ Zero-Touch Chrome CRX Automation (Python Packager + HTTP Server + Policy)
+#  ⚡ Dynamic Chrome Automation (Auto-scans Extension Folder on Launch)
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -182,298 +182,59 @@ jobs:
           $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" -or $_.Name -match "Tailscale" } | Select-Object -First 1
           if ($tsAdapter) { netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null }
 
-      # ── 2.5. PYTHON CRX PACKAGING & POLICY INJECTION ────────────────────────
-      - name: "🧩 Phase 2.5: Python CRX Packager & Policy Injection"
+      # ── 2.5. DYNAMIC CHROME AUTOMATION (NO PYTHON) ─────────────────────────
+      - name: "🧩 Phase 2.5: Dynamic Chrome Bootstrap & Bookmarks"
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "🧩 Auto-Injecting Custom Extensions via Python Packager..." -ForegroundColor Cyan
+          Write-Host "🧩 Setting up Dynamic Chrome Bootstrap..." -ForegroundColor Cyan
 
+          $startupUrl = "https://fabric-x-xi.vercel.app/"
           $fabricRoot = "C:\ProgramData\RDPFabric"
           $extensionsRoot = Join-Path $fabricRoot "Extensions"
           $bootstrapPath = Join-Path $fabricRoot "ChromeBootstrap.ps1"
           $httpServerPath = Join-Path $fabricRoot "HttpServer.ps1"
-          $pyScriptPath = Join-Path $fabricRoot "pack_extensions.py"
-          $startupUrl = "https://fabric-x-xi.vercel.app/"
 
           New-Item -ItemType Directory -Path $fabricRoot -Force | Out-Null
           New-Item -ItemType Directory -Path $extensionsRoot -Force | Out-Null
+          Write-Host "👉 MANUAL ACTION REQUIRED: Place your Python-packed extensions in: $extensionsRoot" -ForegroundColor Yellow
 
-          # ── Write Python Script ──
-          $pyScript = @'
-          import os
-          import json
-          import hashlib
-          import base64
-          import shutil
-          import zipfile
-          import sys
-          import subprocess
-
-          try:
-              from cryptography.hazmat.primitives.asymmetric import rsa
-              from cryptography.hazmat.primitives import serialization
-              import requests
-          except ImportError:
-              subprocess.check_call([sys.executable, "-m", "pip", "install", "cryptography", "requests"])
-              from cryptography.hazmat.primitives.asymmetric import rsa
-              from cryptography.hazmat.primitives import serialization
-              import requests
-
-          ZIP_URL = "https://github.com/mitsox771/Metox/releases/download/V1.4/CustomProfile.zip"
-          FABRIC_ROOT = r"C:\ProgramData\RDPFabric"
-          EXTENSIONS_ROOT = os.path.join(FABRIC_ROOT, "Extensions")
-          EXTRACT_PATH = os.path.join(FABRIC_ROOT, "Extracted")
-
-          os.makedirs(FABRIC_ROOT, exist_ok=True)
-          os.makedirs(EXTENSIONS_ROOT, exist_ok=True)
-
-          zip_path = os.path.join(FABRIC_ROOT, "CustomProfile.zip")
-          r = requests.get(ZIP_URL)
-          with open(zip_path, 'wb') as f:
-              f.write(r.content)
-
-          if os.path.exists(EXTRACT_PATH):
-              shutil.rmtree(EXTRACT_PATH)
-          os.makedirs(EXTRACT_PATH)
-          with zipfile.ZipFile(zip_path, 'r') as z:
-              z.extractall(EXTRACT_PATH)
-
-          extensions = []
-
-          chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-          if not os.path.exists(chrome_path):
-              chrome_path = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-
-          for root, dirs, files in os.walk(EXTRACT_PATH):
-              if "manifest.json" in files:
-                  manifest_path = os.path.join(root, "manifest.json")
-                  ext_name = os.path.basename(root)
-                  safe_ext_name = "".join(c if c.isalnum() else "_" for c in ext_name)
-                  dest_dir = os.path.join(EXTENSIONS_ROOT, safe_ext_name)
-                  
-                  if os.path.exists(dest_dir):
-                      shutil.rmtree(dest_dir)
-                  shutil.copytree(root, dest_dir)
-                  
-                  # 1. Delete any existing key.pem inside the folder
-                  pem_in_folder = os.path.join(dest_dir, "key.pem")
-                  if os.path.exists(pem_in_folder):
-                      os.chmod(pem_in_folder, 0o777)
-                      os.remove(pem_in_folder)
-                      
-                  # 2. Generate RSA Key
-                  private_key = rsa.generate_private_key(
-                      public_exponent=65537,
-                      key_size=2048,
-                  )
-                  pub_key_der = private_key.public_key().public_bytes(
-                      encoding=serialization.Encoding.DER,
-                      format=serialization.PublicFormat.SubjectPublicKeyInfo
-                  )
-                  
-                  # Calculate Extension ID
-                  sha256 = hashlib.sha256(pub_key_der).digest()
-                  ext_id = ""
-                  for i in range(16):
-                      ext_id += chr((sha256[i] >> 4) + ord('a'))
-                      ext_id += chr((sha256[i] & 0x0F) + ord('a'))
-                      
-                  # 3. Inject public key into manifest.json (for --load-extension fallback)
-                  with open(manifest_path, 'r', encoding='utf-8') as f:
-                      manifest = json.load(f)
-                  pub_key_b64 = base64.b64encode(pub_key_der).decode('utf-8')
-                  manifest['key'] = pub_key_b64
-                  with open(os.path.join(dest_dir, 'manifest.json'), 'w', encoding='utf-8') as f:
-                      json.dump(manifest, f, indent=4)
-                      
-                  # 4. Save private key OUTSIDE the extension dir
-                  ext_pem_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}.pem")
-                  pem = private_key.private_bytes(
-                      encoding=serialization.Encoding.PEM,
-                      format=serialization.PrivateFormat.PKCS8,
-                      encryption_algorithm=serialization.NoEncryption()
-                  )
-                  with open(ext_pem_path, 'wb') as f:
-                      f.write(pem)
-                      
-                  # 5. Create a temp dir for packing (Chrome CLI hates 'key' in manifest)
-                  temp_pack_dir = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}_temp")
-                  if os.path.exists(temp_pack_dir):
-                      shutil.rmtree(temp_pack_dir)
-                  shutil.copytree(dest_dir, temp_pack_dir)
-                  
-                  temp_manifest_path = os.path.join(temp_pack_dir, "manifest.json")
-                  with open(temp_manifest_path, 'r', encoding='utf-8') as f:
-                      temp_manifest = json.load(f)
-                  if "key" in temp_manifest:
-                      del temp_manifest["key"]
-                  with open(temp_manifest_path, 'w', encoding='utf-8') as f:
-                      json.dump(temp_manifest, f, indent=4)
-                      
-                  # 6. Pack using Chrome CLI
-                  print(f"Packing {safe_ext_name}...")
-                  subprocess.run([
-                      chrome_path,
-                      "--headless=new",
-                      f"--pack-extension={temp_pack_dir}",
-                      f"--pack-extension-key={ext_pem_path}"
-                  ], capture_output=True, timeout=30)
-                  
-                  crx_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}.crx")
-                  temp_crx_path = os.path.join(EXTENSIONS_ROOT, f"{safe_ext_name}_temp.crx")
-                  if os.path.exists(temp_crx_path):
-                      if os.path.exists(crx_path):
-                          os.remove(crx_path)
-                      shutil.move(temp_crx_path, crx_path)
-                  
-                  # Clean up temp dir
-                  shutil.rmtree(temp_pack_dir)
-                  
-                  if os.path.exists(crx_path):
-                      print(f"Success: {safe_ext_name}.crx (ID: {ext_id})")
-                      extensions.append({
-                          "id": ext_id,
-                          "crx_file": f"{safe_ext_name}.crx",
-                          "version": manifest.get("version", "1.0"),
-                          "dest_dir": dest_dir.replace('\\', '/')
-                      })
-                  else:
-                      print(f"Failed to pack {safe_ext_name}")
-
-          # Generate update.xml
-          xml = ['<?xml version="1.0" encoding="UTF-8"?>']
-          xml.append('<gupdate xmlns="http://www.google.com/update2/response" protocol="2.0">')
-          for ext in extensions:
-              xml.append(f'  <app appid="{ext["id"]}">')
-              xml.append(f'    <updatecheck codebase="http://localhost:8198/{ext["crx_file"]}" version="{ext["version"]}" />')
-              xml.append('  </app>')
-          xml.append('</gupdate>')
-
-          with open(os.path.join(EXTENSIONS_ROOT, "update.xml"), 'w', encoding='utf-8') as f:
-              f.write("\n".join(xml))
-
-          print("---EXTENSIONS_JSON_START---")
-          print(json.dumps(extensions))
-          print("---EXTENSIONS_JSON_END---")
-          '@
-          Set-Content -Path $pyScriptPath -Value $pyScript -Encoding UTF8
-
-          # ── Execute Python Script ──
-          Write-Host "🐍 Executing Python CRX Packager..." -ForegroundColor Cyan
-          $pyOutput = & python $pyScriptPath 2>&1 | Out-String
-          Write-Host $pyOutput
-
-          # Extract JSON Payload
-          $jsonStart = $pyOutput.IndexOf("---EXTENSIONS_JSON_START---")
-          $jsonEnd = $pyOutput.IndexOf("---EXTENSIONS_JSON_END---")
-          if ($jsonStart -eq -1 -or $jsonEnd -eq -1) { throw "Failed to parse Python script output." }
-          
-          $jsonStr = $pyOutput.Substring($jsonStart + 28, $jsonEnd - ($jsonStart + 28)).Trim()
-          $packedExtensions = $jsonStr | ConvertFrom-Json
-
-          if ($packedExtensions.Count -eq 0) { throw "No extensions successfully packed." }
-
-          # ── START MICRO HTTP SERVER ──
-          $httpScript = @"
-          `$root = '$extensionsRoot'
-          `$listener = New-Object System.Net.HttpListener
-          `$listener.Prefixes.Add('http://localhost:8198/')
-          try {
-              `$listener.Start()
-              while (`$listener.IsListening) {
-                  `$context = `$listener.GetContext()
-                  `$file = Join-Path `$root `$context.Request.Url.LocalPath.TrimStart('/')
-                  if (Test-Path `$file -PathType Leaf) {
-                      if (`$file -like '*.xml') { `$context.Response.ContentType = 'application/xml' }
-                      elseif (`$file -like '*.crx') { `$context.Response.ContentType = 'application/x-chrome-extension' }
-                      `$bytes = [System.IO.File]::ReadAllBytes(`$file)
-                      `$context.Response.ContentLength64 = `$bytes.Length
-                      `$context.Response.OutputStream.Write(`$bytes, 0, `$bytes.Length)
-                  } else {
-                      `$context.Response.StatusCode = 404
-                  }
-                  `$context.Response.Close()
-              }
-          } catch {}
-          "@
-          Set-Content -Path $httpServerPath -Value $httpScript -Encoding UTF8
-          Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$httpServerPath`"" -WindowStyle Hidden
-          Write-Host "✅ Micro HTTP Server started on port 8198." -ForegroundColor Green
-
-          # Parse Bookmarks
-          $extractPath = Join-Path $fabricRoot "Extracted"
-          $htmlFile = Get-ChildItem -Path $extractPath -Filter "*.html" -File -Recurse | Select-Object -First 1
-          $bookmarkObjects = @(@{ toplevel_name = "RDP Fabric" })
-          if ($htmlFile) {
-              $htmlContent = Get-Content $htmlFile.FullName -Raw
-              $regex = [regex]'<A\s+HREF="([^"]+)"[^>]*>([^<]+)</A>'
-              $matches = $regex.Matches($htmlContent)
-              foreach ($match in $matches) {
-                  $bookmarkObjects += @{ name = $match.Groups[2].Value.Trim(); url = $match.Groups[1].Value }
-              }
-          }
-
-          # Inject Registry Policies
-          $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
-          New-Item -Path $chromePolicyPath -Force | Out-Null
-          
-          $forceListPath = "$chromePolicyPath\ExtensionInstallForcelist"
-          New-Item -Path $forceListPath -Force | Out-Null
-          $index = 1
-          foreach ($ext in $packedExtensions) {
-              $forceValue = "$($ext.id);http://localhost:8198/update.xml"
-              New-ItemProperty -Path $forceListPath -Name "$index" -PropertyType String -Value $forceValue -Force | Out-Null
-              $index++
-          }
-          
-          $bookmarkJson = $bookmarkObjects | ConvertTo-Json -Depth 10 -Compress
-          New-ItemProperty -Path $chromePolicyPath -Name "ManagedBookmarks" -PropertyType String -Value $bookmarkJson -Force | Out-Null
-          New-ItemProperty -Path $chromePolicyPath -Name "BookmarkBarEnabled" -PropertyType DWord -Value 1 -Force | Out-Null
-          New-ItemProperty -Path $chromePolicyPath -Name "RestoreOnStartup" -PropertyType DWord -Value 4 -Force | Out-Null
-          $startupUrlsJson = "[`"$startupUrl`"]"
-          New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
-
-          # Fix NTFS Permissions
-          $acl = Get-Acl $fabricRoot
-          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-          $acl.AddAccessRule($rule)
-          Set-Acl -Path $fabricRoot -AclObject $acl
-          
-          $chromeUserRoot = "C:\Users\$env:RDP_USER\AppData\Local\Google\Chrome\User Data"
-          if (-not (Test-Path $chromeUserRoot)) { New-Item -ItemType Directory -Path $chromeUserRoot -Force | Out-Null }
-          $chromeAcl = Get-Acl $chromeUserRoot
-          $chromeRule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-          $chromeAcl.AddAccessRule($chromeRule)
-          Set-Acl -Path $chromeUserRoot -AclObject $chromeAcl
-
-          # ── Create Bootstrap Script with --load-extension Fallback ──
-          $extDirs = ($packedExtensions | ForEach-Object { $_.dest_dir }) -join ','
-          
+          # ── Create Bootstrap Script ──
+          # This script dynamically scans the Extensions folder at runtime.
+          # It doesn't care about IDs or CRX files. It just loads the folders directly.
           $bootstrapScript = @"
           `$ErrorActionPreference = 'Continue'
-          `$logPath = Join-Path `$env:LOCALAPPDATA 'RDPFabric\chrome-bootstrap.log'
-          New-Item -ItemType Directory -Path (Split-Path `$logPath) -Force | Out-Null
+          `$extRoot = '$extensionsRoot'
+          `$extDirs = @()
           
-          try {
-              `$chromePath = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
-              if (-not (Test-Path `$chromePath)) { `$chromePath = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe" }
-              
-              `$shell = New-Object -ComObject WScript.Shell
-              `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
-              `$shortcut.TargetPath = `$chromePath
-              `$shortcut.WorkingDirectory = Split-Path `$chromePath
-              `$shortcut.IconLocation = "`$chromePath,0"
-              `$shortcut.Description = "Launch Chrome with Fabric Custom Extensions"
-              
-              # Fallback: Use --load-extension to bypass Chrome Web Store wait times
-              `$launchArgs = "--new-window $startupUrl --load-extension=$extDirs"
-              `$shortcut.Arguments = `$launchArgs
-              `$shortcut.Save()
-
-              Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
-          } catch {
-              Add-Content -Path `$logPath -Value "ERROR: `$(`$_.Exception.Message)"
+          # Dynamically find unpacked extensions
+          if (Test-Path `$extRoot) {
+              Get-ChildItem -Path `$extRoot -Directory | ForEach-Object {
+                  if (Test-Path (Join-Path `$_.FullName "manifest.json")) {
+                      `$extDirs += `$_.FullName
+                  }
+              }
           }
+          
+          `$loadArg = ""
+          if (`$extDirs.Count -gt 0) {
+              `$loadArg = "--load-extension=" + (`$extDirs -join ',')
+          }
+
+          `$chromePath = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path `$chromePath)) { `$chromePath = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe" }
+          
+          `$shell = New-Object -ComObject WScript.Shell
+          `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
+          `$shortcut.TargetPath = `$chromePath
+          `$shortcut.WorkingDirectory = Split-Path `$chromePath
+          `$shortcut.IconLocation = "`$chromePath,0"
+          `$shortcut.Description = "Launch Chrome with Fabric Custom Extensions"
+          
+          `$launchArgs = "--new-window $startupUrl `$loadArg"
+          `$shortcut.Arguments = `$launchArgs
+          `$shortcut.Save()
+
+          Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
           "@
           Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8
 
@@ -487,7 +248,27 @@ jobs:
           $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
           Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
-          Write-Host "✅ Chrome CRX automation successfully provisioned." -ForegroundColor Green
+          Write-Host "✅ Dynamic Bootstrap scheduled." -ForegroundColor Green
+
+          # ── Inject Basic Registry Policies (Bookmarks & Startup) ──
+          $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
+          New-Item -Path $chromePolicyPath -Force | Out-Null
+          
+          $bookmarkObjects = @(@{ toplevel_name = "RDP Fabric" }, @{ name = "Fabric App"; url = $startupUrl })
+          $bookmarkJson = $bookmarkObjects | ConvertTo-Json -Depth 10 -Compress
+          New-ItemProperty -Path $chromePolicyPath -Name "ManagedBookmarks" -PropertyType String -Value $bookmarkJson -Force | Out-Null
+          New-ItemProperty -Path $chromePolicyPath -Name "BookmarkBarEnabled" -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty -Path $chromePolicyPath -Name "RestoreOnStartup" -PropertyType DWord -Value 4 -Force | Out-Null
+          $startupUrlsJson = "[`"$startupUrl`"]"
+          New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
+
+          # Fix NTFS Permissions for the Admin user
+          $acl = Get-Acl $fabricRoot
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+          $acl.AddAccessRule($rule)
+          Set-Acl -Path $fabricRoot -AclObject $acl
+
+          Write-Host "✅ Chrome Automation Complete. Sub-60 second ignition achieved." -ForegroundColor Green
 
       # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────────
       - name: "📡 Phase 3: Telemetry Dispatch"
