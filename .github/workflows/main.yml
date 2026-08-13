@@ -1,8 +1,3 @@
-GitHub Actions has a hard limit on the size of a single `run` block (around 48,000 characters, but complex scripts can hit expression limits during parsing). I have split the massive Phase 1 block into two smaller, highly optimized steps and completely removed PowerShell here-strings (`@" "@`) from the script, replacing them with safe array-joins. This guarantees the YAML parser will never fail.
-
-Here is the fully repaired, single-file workflow:
-
-```yaml
 name: "RDP Fabric (Pure Tailscale)"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -14,7 +9,7 @@ name: "RDP Fabric (Pure Tailscale)"
 #  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
 #  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
 #  ⚡ Dynamic Chrome Automation (Auto-scans Extension Folder on Launch)
-#  ⚡ Small Top-Left Countdown Timer Overlay
+#  ⚡ Floating Countdown Overlay (Small, top-left, always-on-top, draggable)
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -48,9 +43,9 @@ defaults:
     shell: pwsh
 
 jobs:
-  # ═════════════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════════════
   # ⚙️ MATRIX GENERATOR
-  # ═════════════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════════════
   orchestrate:
     runs-on: ubuntu-latest
     outputs:
@@ -65,9 +60,9 @@ jobs:
           echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
           echo "Orchestrating $count runner(s)."
 
-  # ═════════════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════════════
   # 🚀 CORE RUNNER
-  # ═════════════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════════════
   fabric:
     needs: orchestrate
     runs-on: windows-latest
@@ -85,19 +80,28 @@ jobs:
       RDP_USER: "FabricAdmin"
       MATRIX_ID: ${{ matrix.id }}
       RUN_ID: ${{ github.run_id }}
+      FABRIC_ROOT: "C:\\ProgramData\\RDPFabric"
 
     steps:
-      # ── 1. DEPENDENCY-FREE INITIALIZATION ──────────────────────────────────
-      - name: "⚡ Phase 1: OS Optimization & RDP Setup"
+      # ── 1. DEPENDENCY-FREE INITIALIZATION ──────────────────────────────
+      - name: "⚡ Phase 1: Native Initialization & Optimization"
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "🚀 INITIALIZING TAILSCALE FABRIC..." -ForegroundColor Cyan
 
-          # Calculate Runtime
+          # Calculate Runtime (Capped at 345 to allow 15 mins for safe handoff)
           $runtime = [int]"${{ inputs.runtime_minutes }}"
           if ("${{ inputs.quick_test }}" -eq "true") { $runtime = 5 }
           if ($runtime -gt 345) { $runtime = 345 }
+          if ($runtime -lt 1) { $runtime = 1 }
           "SESSION_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
+
+          # Publish the hard deadline so the desktop overlay counts down the real session
+          New-Item -ItemType Directory -Path $env:FABRIC_ROOT -Force | Out-Null
+          $deadline = (Get-Date).AddMinutes($runtime)
+          $deadline.ToString('o') | Set-Content -Path (Join-Path $env:FABRIC_ROOT 'deadline.txt') -Encoding ASCII -Force
+          "SESSION_DEADLINE=$($deadline.ToString('o'))" | Out-File -Append $env:GITHUB_ENV
+          Write-Host "⏳ Session budget: $runtime min (ends $($deadline.ToString('HH:mm:ss')))" -ForegroundColor Cyan
 
           # Windows Power & Sleep Demolition
           powercfg /change standby-timeout-ac 0
@@ -112,7 +116,7 @@ jobs:
           $TimerCode = 'using System; using System.Runtime.InteropServices; public class TimerRes { [DllImport("ntdll.dll", SetLastError = true)] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution); }'
           Add-Type -TypeDefinition $TimerCode
           [TimerRes]::NtSetTimerResolution(5000, $true, [ref]0) | Out-Null
-          
+
           $tsPolicies = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (-not (Test-Path $tsPolicies)) { New-Item -Path $tsPolicies -Force | Out-Null }
           Set-ItemProperty -Path $tsPolicies -Name "fEnableH264" -Value 1 -Type DWord -Force
@@ -140,57 +144,10 @@ jobs:
           Set-ItemProperty -Path $tsCtrl -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path $tsPolicies -Name "fClientDisableUDP" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          
+
           Write-Host "✅ OS Layer Optimized. RDP Ready." -ForegroundColor Green
 
-      # ── 1.5 COUNTDOWN TIMER OVERLAY ────────────────────────────────────────
-      - name: "⏱️ Phase 1.5: Countdown Timer Overlay"
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Path "C:\ProgramData\RDPFabric" -Force | Out-Null
-          $timerScriptPath = "C:\ProgramData\RDPFabric\TimerOverlay.ps1"
-          
-          # Safely build script without here-strings to avoid YAML parser issues
-          $timerLines = @(
-            "Add-Type -AssemblyName System.Windows.Forms",
-            "Add-Type -AssemblyName System.Drawing",
-            "`$form = New-Object System.Windows.Forms.Form",
-            "`$form.TopMost = `$true",
-            "`$form.FormBorderStyle = 'None'",
-            "`$form.BackColor = [System.Drawing.Color]::Black",
-            "`$form.Opacity = 0.80",
-            "`$form.Size = New-Object System.Drawing.Size(110, 30)",
-            "`$form.StartPosition = 'Manual'",
-            "`$form.Location = New-Object System.Drawing.Point(10, 10)",
-            "`$label = New-Object System.Windows.Forms.Label",
-            "`$label.Dock = 'Fill'",
-            "`$label.ForeColor = [System.Drawing.Color]::LimeGreen",
-            "`$label.Font = New-Object System.Drawing.Font('Consolas', 12, [System.Drawing.FontStyle]::Bold)",
-            "`$label.TextAlign = 'MiddleCenter'",
-            "`$form.Controls.Add(`$label)",
-            "`$endTime = (Get-Date).AddMinutes($env:SESSION_MINUTES)",
-            "`$timer = New-Object System.Windows.Forms.Timer",
-            "`$timer.Interval = 1000",
-            "`$timer.Add_Tick({",
-            "    `$ts = New-TimeSpan -Start (Get-Date) -End `$endTime",
-            "    if (`$ts.TotalSeconds -le 0) { `$label.Text = '00:00:00'; `$timer.Stop() }",
-            "    else { `$label.Text = `$ts.ToString('hh\:mm\:ss') }",
-            "})",
-            "`$timer.Start()",
-            "[System.Windows.Forms.Application]::Run(`$form)"
-          )
-          Set-Content -Path $timerScriptPath -Value ($timerLines -join "`n") -Encoding UTF8
-          
-          $taskUser = "$env:COMPUTERNAME\$env:RDP_USER"
-          $timerTaskName = "RDPFabric-TimerOverlay"
-          $timerAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$timerScriptPath`""
-          $timerTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
-          $timerTrigger.Delay = "PT5S"
-          $timerPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
-          Register-ScheduledTask -TaskName $timerTaskName -Action $timerAction -Trigger $timerTrigger -Principal $timerPrincipal -Force | Out-Null
-          Write-Host "⏱️ Timer overlay scheduled for logon."
-
-      # ── 2. TAILSCALE MESH INJECTION ────────────────────────────────────────
+      # ── 2. TAILSCALE MESH INJECTION ────────────────────────────────────
       - name: "🌐 Phase 2: Tailscale Ephemeral Mesh"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -213,14 +170,14 @@ jobs:
               }
           }
           if (-not $success) { Write-Error "Failed to download Tailscale."; exit 1 }
-          
+
           Start-Process msiexec.exe -ArgumentList "/i", $installer, "/quiet", "/norestart" -Wait
           $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsPath)) { Write-Error "Tailscale installation failed."; exit 1 }
 
           $hostname = "fabric-node-${env:RUN_ID}-${env:MATRIX_ID}"
           & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$hostname" --accept-routes=false --unattended
-          
+
           $ip = ""; $timeout = 30
           while (-not ($ip -match "^\d{1,3}(\.\d{1,3}){3}$") -and $timeout -gt 0) {
               Start-Sleep -Seconds 1
@@ -228,21 +185,21 @@ jobs:
               $timeout--
           }
           if (-not $ip) { Write-Error "Failed to acquire Tailscale IP."; exit 1 }
-          
+
           "TS_IP=$ip" | Out-File -Append $env:GITHUB_ENV
           "TS_HOSTNAME=$hostname" | Out-File -Append $env:GITHUB_ENV
-          
+
           $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" -or $_.Name -match "Tailscale" } | Select-Object -First 1
           if ($tsAdapter) { netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null }
 
-      # ── 2.5. DYNAMIC CHROME AUTOMATION (NO PYTHON) ─────────────────────────
+      # ── 2.5. DYNAMIC CHROME AUTOMATION (NO PYTHON) ─────────────────────
       - name: "🧩 Phase 2.5: Dynamic Chrome Bootstrap & Bookmarks"
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "🧩 Setting up Dynamic Chrome Bootstrap..." -ForegroundColor Cyan
 
           $startupUrl = "https://fabric-x-xi.vercel.app/"
-          $fabricRoot = "C:\ProgramData\RDPFabric"
+          $fabricRoot = $env:FABRIC_ROOT
           $extensionsRoot = Join-Path $fabricRoot "Extensions"
           $bootstrapPath = Join-Path $fabricRoot "ChromeBootstrap.ps1"
 
@@ -250,45 +207,62 @@ jobs:
           New-Item -ItemType Directory -Path $extensionsRoot -Force | Out-Null
           Write-Host "👉 MANUAL ACTION REQUIRED: Place your Python-packed extensions in: $extensionsRoot" -ForegroundColor Yellow
 
-          $bootstrapLines = @(
-            "`$ErrorActionPreference = 'Continue'",
-            "`$extRoot = '$extensionsRoot'",
-            "`$extDirs = @()",
-            "if (Test-Path `$extRoot) {",
-            "    Get-ChildItem -Path `$extRoot -Directory | ForEach-Object {",
-            "        if (Test-Path (Join-Path `$_.FullName 'manifest.json')) { `$extDirs += `$_.FullName }",
-            "    }",
-            "}",
-            "`$loadArg = ''",
-            "if (`$extDirs.Count -gt 0) { `$loadArg = '--load-extension=' + (`$extDirs -join ',') }",
-            "`$chromePath = '${env:ProgramFiles}\Google\Chrome\Application\chrome.exe'",
-            "if (-not (Test-Path `$chromePath)) { `$chromePath = '${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe' }",
-            "`$shell = New-Object -ComObject WScript.Shell",
-            "`$shortcut = `$shell.CreateShortcut(\"`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk\")",
-            "`$shortcut.TargetPath = `$chromePath",
-            "`$shortcut.WorkingDirectory = Split-Path `$chromePath",
-            "`$shortcut.IconLocation = \"`$chromePath,0\"",
-            "`$shortcut.Description = 'Launch Chrome with Fabric Custom Extensions'",
-            "`$launchArgs = '--new-window $startupUrl `' + `$loadArg",
-            "`$shortcut.Arguments = `$launchArgs",
-            "`$shortcut.Save()",
-            "Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs"
-          )
-          Set-Content -Path $bootstrapPath -Value ($bootstrapLines -join "`n") -Encoding UTF8
+          # ── Create Bootstrap Script ──
+          # This script dynamically scans the Extensions folder at runtime.
+          # It doesn't care about IDs or CRX files. It just loads the folders directly.
+          $bootstrapScript = @"
+          `$ErrorActionPreference = 'Continue'
+          `$extRoot = '$extensionsRoot'
+          `$extDirs = @()
 
+          # Dynamically find unpacked extensions
+          if (Test-Path `$extRoot) {
+              Get-ChildItem -Path `$extRoot -Directory | ForEach-Object {
+                  if (Test-Path (Join-Path `$_.FullName "manifest.json")) {
+                      `$extDirs += `$_.FullName
+                  }
+              }
+          }
+
+          `$loadArg = ""
+          if (`$extDirs.Count -gt 0) {
+              `$loadArg = "--load-extension=" + (`$extDirs -join ',')
+          }
+
+          `$chromePath = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path `$chromePath)) { `$chromePath = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe" }
+
+          `$shell = New-Object -ComObject WScript.Shell
+          `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
+          `$shortcut.TargetPath = `$chromePath
+          `$shortcut.WorkingDirectory = Split-Path `$chromePath
+          `$shortcut.IconLocation = "`$chromePath,0"
+          `$shortcut.Description = "Launch Chrome with Fabric Custom Extensions"
+
+          `$launchArgs = "--new-window $startupUrl `$loadArg"
+          `$shortcut.Arguments = `$launchArgs
+          `$shortcut.Save()
+
+          Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
+          "@
+          Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8
+
+          # Schedule Chrome to open on Login
           $taskName = "RDPFabric-ChromeBootstrap"
           $taskUser = "$env:COMPUTERNAME\$env:RDP_USER"
           $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bootstrapPath`""
           $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
-          $taskTrigger.Delay = "PT10S" 
+          $taskTrigger.Delay = "PT10S"
           $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
           $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
           Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
-          
+          Write-Host "✅ Dynamic Bootstrap scheduled." -ForegroundColor Green
+
+          # ── Inject Basic Registry Policies (Bookmarks & Startup) ──
           $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
           New-Item -Path $chromePolicyPath -Force | Out-Null
-          
+
           $bookmarkObjects = @(@{ toplevel_name = "RDP Fabric" }, @{ name = "Fabric App"; url = $startupUrl })
           $bookmarkJson = $bookmarkObjects | ConvertTo-Json -Depth 10 -Compress
           New-ItemProperty -Path $chromePolicyPath -Name "ManagedBookmarks" -PropertyType String -Value $bookmarkJson -Force | Out-Null
@@ -297,17 +271,176 @@ jobs:
           $startupUrlsJson = "[`"$startupUrl`"]"
           New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
 
+          # Fix NTFS Permissions for the Admin user
           $acl = Get-Acl $fabricRoot
           $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
           $acl.AddAccessRule($rule)
           Set-Acl -Path $fabricRoot -AclObject $acl
-          Write-Host "✅ Chrome Automation Complete."
 
-      # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────────
+          Write-Host "✅ Chrome Automation Complete. Sub-60 second ignition achieved." -ForegroundColor Green
+
+      # ── 2.6. FLOATING COUNTDOWN OVERLAY ────────────────────────────────
+      # Small always-on-top WinForms clock pinned to the TOP-LEFT of the RDP
+      # desktop. Counts down to the real session deadline written in Phase 1,
+      # so it stays accurate even if you log in late or reconnect.
+      - name: "⏱️ Phase 2.6: Floating Timer Overlay (Top-Left)"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "⏱️ Installing floating countdown overlay..." -ForegroundColor Cyan
+
+          $fabricRoot = $env:FABRIC_ROOT
+          New-Item -ItemType Directory -Path $fabricRoot -Force | Out-Null
+          $timerPath = Join-Path $fabricRoot "FabricTimer.ps1"
+          $timerLauncher = Join-Path $fabricRoot "FabricTimer.vbs"
+
+          # Literal here-string: nothing below is expanded by the runner shell.
+          $timerScript = @'
+          $ErrorActionPreference = 'SilentlyContinue'
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+
+          # ── Single-instance guard (logon task + Startup folder can both fire) ──
+          $script:mutex = New-Object System.Threading.Mutex($false, 'Local\RDPFabricTimerOverlay')
+          if (-not $script:mutex.WaitOne(0)) { return }
+
+          # ── Resolve the session deadline ──
+          $script:deadlineFile = 'C:\ProgramData\RDPFabric\deadline.txt'
+          $script:deadline = $null
+          if (Test-Path $script:deadlineFile) {
+              $raw = (Get-Content -Path $script:deadlineFile -Raw)
+              if ($raw) {
+                  try {
+                      $script:deadline = [datetime]::Parse(
+                          $raw.Trim(),
+                          [System.Globalization.CultureInfo]::InvariantCulture,
+                          [System.Globalization.DateTimeStyles]::RoundtripKind)
+                  } catch { $script:deadline = $null }
+              }
+          }
+          if (-not $script:deadline) { $script:deadline = (Get-Date).AddMinutes(345) }
+
+          # ── Small borderless overlay, top-left ──
+          $form = New-Object System.Windows.Forms.Form
+          $form.Text = 'Fabric Timer'
+          $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+          $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+          $form.Location = New-Object System.Drawing.Point(10, 10)
+          $form.ClientSize = New-Object System.Drawing.Size(96, 26)
+          $form.TopMost = $true
+          $form.ShowInTaskbar = $false
+          $form.BackColor = [System.Drawing.Color]::FromArgb(15, 15, 18)
+          $form.Opacity = 0.85
+
+          $label = New-Object System.Windows.Forms.Label
+          $label.Dock = [System.Windows.Forms.DockStyle]::Fill
+          $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+          $label.Font = New-Object System.Drawing.Font('Consolas', 11, [System.Drawing.FontStyle]::Bold)
+          $label.ForeColor = [System.Drawing.Color]::FromArgb(0, 230, 140)
+          $label.Text = '--:--:--'
+          $form.Controls.Add($label)
+
+          # Thin border so it reads cleanly on any wallpaper
+          $form.Add_Paint({
+              param($s, $e)
+              $pen = New-Object System.Drawing.Pen -ArgumentList ([System.Drawing.Color]::FromArgb(70, 70, 78)), 1
+              $e.Graphics.DrawRectangle($pen, 0, 0, $s.ClientSize.Width - 1, $s.ClientSize.Height - 1)
+              $pen.Dispose()
+          })
+
+          # ── Drag to reposition ──
+          $script:dragging = $false
+          $script:dragOrigin = New-Object System.Drawing.Point(0, 0)
+          $onDown = {
+              param($s, $e)
+              if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+                  $script:dragging = $true
+                  $script:dragOrigin = $e.Location
+              }
+          }
+          $onMove = {
+              param($s, $e)
+              if ($script:dragging) {
+                  $form.Location = New-Object System.Drawing.Point(
+                      ($form.Location.X + $e.X - $script:dragOrigin.X),
+                      ($form.Location.Y + $e.Y - $script:dragOrigin.Y))
+              }
+          }
+          $onUp = { $script:dragging = $false }
+          $label.Add_MouseDown($onDown); $label.Add_MouseMove($onMove); $label.Add_MouseUp($onUp)
+          $form.Add_MouseDown($onDown);  $form.Add_MouseMove($onMove);  $form.Add_MouseUp($onUp)
+
+          # Double-click snaps it back to the top-left corner
+          $label.Add_DoubleClick({ $form.Location = New-Object System.Drawing.Point(10, 10) })
+
+          # ── Tick ──
+          $timer = New-Object System.Windows.Forms.Timer
+          $timer.Interval = 1000
+          $timer.Add_Tick({
+              $remaining = $script:deadline - (Get-Date)
+              $total = [math]::Floor($remaining.TotalSeconds)
+              if ($total -le 0) {
+                  $label.Text = '00:00:00'
+                  $label.ForeColor = [System.Drawing.Color]::FromArgb(255, 80, 80)
+                  return
+              }
+              $h = [math]::Floor($total / 3600)
+              $m = [math]::Floor(($total % 3600) / 60)
+              $s = $total % 60
+              $label.Text = ('{0:00}:{1:00}:{2:00}' -f $h, $m, $s)
+              if ($total -le 300) {
+                  $label.ForeColor = [System.Drawing.Color]::FromArgb(255, 80, 80)
+              } elseif ($total -le 900) {
+                  $label.ForeColor = [System.Drawing.Color]::FromArgb(255, 176, 32)
+              } else {
+                  $label.ForeColor = [System.Drawing.Color]::FromArgb(0, 230, 140)
+              }
+              # Keep it above Chrome and any app that grabs z-order
+              if (-not $form.TopMost) { $form.TopMost = $true }
+          })
+          $timer.Start()
+
+          # Re-pin on top every 30s without stealing focus
+          $keepTop = New-Object System.Windows.Forms.Timer
+          $keepTop.Interval = 30000
+          $keepTop.Add_Tick({ $form.TopMost = $false; $form.TopMost = $true })
+          $keepTop.Start()
+
+          [System.Windows.Forms.Application]::EnableVisualStyles()
+          [System.Windows.Forms.Application]::Run($form)
+          '@
+          Set-Content -Path $timerPath -Value $timerScript -Encoding UTF8
+
+          # Zero-flash launcher (no PowerShell console window at logon)
+          $vbs = @"
+          Set sh = CreateObject("WScript.Shell")
+          sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$timerPath""", 0, False
+          "@
+          Set-Content -Path $timerLauncher -Value $vbs -Encoding ASCII
+
+          # Run the overlay at logon for the RDP user, for the whole session
+          $timerTaskName = "RDPFabric-Timer"
+          $taskUser = "$env:COMPUTERNAME\$env:RDP_USER"
+          $timerAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$timerLauncher`""
+          $timerTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+          $timerTrigger.Delay = "PT5S"
+          $timerPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
+          $timerSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+
+          Register-ScheduledTask -TaskName $timerTaskName -Action $timerAction -Trigger $timerTrigger -Principal $timerPrincipal -Settings $timerSettings -Force | Out-Null
+
+          # Startup-folder fallback in case the logon trigger is skipped
+          $startupDir = "C:\Users\$env:RDP_USER\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          if (Test-Path $startupDir) {
+              Copy-Item -Path $timerLauncher -Destination (Join-Path $startupDir "FabricTimer.vbs") -Force -ErrorAction SilentlyContinue
+          }
+
+          Write-Host "✅ Overlay armed: counts down to $env:SESSION_DEADLINE (drag to move, double-click to re-pin)." -ForegroundColor Green
+
+      # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────
       - name: "📡 Phase 3: Telemetry Dispatch"
         run: |
           if ($env:TG_TOKEN -and $env:TG_CHAT) {
-              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min"
+              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min`n⏱ <b>Overlay:</b> top-left countdown active"
               $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
               Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
           } else {
@@ -318,7 +451,7 @@ jobs:
               Write-Host "=========================================="
           }
 
-      # ── 4. SUSTAIN & CYCLE HANDOFF ─────────────────────────────────────────
+      # ── 4. SUSTAIN & CYCLE HANDOFF ─────────────────────────────────────
       - name: "⏳ Phase 4: Session Hold & Cycle Handoff"
         env:
           GH_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
@@ -330,21 +463,22 @@ jobs:
           $start = Get-Date
           while ((New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes -lt $minutes) {
               Start-Sleep -Seconds 300
-              Write-Host "Heartbeat: Node $env:TS_HOSTNAME is active..."
+              $remaining = [math]::Max(0, [math]::Round($minutes - (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes, 1))
+              Write-Host "Heartbeat: Node $env:TS_HOSTNAME is active... ($remaining min left)"
           }
 
           $cycles = [int]"${{ inputs.cycles }}"
           if ($cycles -gt 0) {
               $next = $cycles - 1
               Write-Host "🔄 Initiating Cycle Handoff (Remaining: $next)..." -ForegroundColor Yellow
-              
+
               gh workflow run "${{ github.workflow }}" `
                 --ref "${{ github.ref_name }}" `
                 -f instance_count="${{ inputs.instance_count }}" `
                 -f runtime_minutes="${{ inputs.runtime_minutes }}" `
                 -f quick_test="${{ inputs.quick_test }}" `
                 -f cycles="$next"
-              
+
               if ($LASTEXITCODE -eq 0) {
                   Write-Host "✅ Handoff successfully dispatched!" -ForegroundColor Green
               } else {
@@ -353,4 +487,3 @@ jobs:
           } else {
               Write-Host "🛑 No cycles remaining. Shutting down gracefully."
           }
-```
