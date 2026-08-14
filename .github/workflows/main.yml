@@ -11,6 +11,8 @@ name: "RDP Fabric (Pure Tailscale)"
 #  ⚡ Dynamic Chrome Automation (Auto-scans Extension Folder on Launch)
 #  ⚡ Floating Countdown Overlay (Small, top-left, always-on-top, draggable)
 #  ⚡ GOD MODE: Parallel ignition, 60fps DWM, direct-path UDP, watchdog
+#  ⚡ Fast RDP file copy (drive + clipboard channels, flow-control off)
+#  ⚡ Workstation mode: 3rd-party installers run without SmartScreen/UAC/MOTW fights
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -134,10 +136,15 @@ jobs:
           # ── Defender Mitigation ──
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
 
-          # ── Bloat services: stop & disable (search indexing, telemetry, delivery optimization, print spooler) ──
-          foreach ($svc in 'WSearch','DiagTrack','DoSvc','Spooler','SysMain') {
+          # ── Bloat only: search indexer + telemetry. NEVER kill Spooler/SysMain/DoSvc/BITS/WU —
+          #    3rd-party installers, MSI, winget, and printers depend on them.
+          foreach ($svc in 'WSearch','DiagTrack') {
               Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
               Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+          }
+          foreach ($svc in 'Spooler','SysMain','DoSvc','wuauserv','bits','msiserver','TrustedInstaller','CryptSvc','LanmanServer','LanmanWorkstation','Winmgmt') {
+              Set-Service -Name $svc -StartupType Automatic -ErrorAction SilentlyContinue
+              Start-Service -Name $svc -ErrorAction SilentlyContinue
           }
 
           # ── RDP GRAPHICS & LATENCY OVERHAUL ──
@@ -169,8 +176,20 @@ jobs:
               Set-ItemProperty -Path $iface.PSPath -Name "TCPNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           }
           try { Set-NetTCPSetting -SettingName InternetCustom -CongestionProvider CUBIC -ErrorAction SilentlyContinue } catch {}
-          netsh int tcp set global autotuninglevel=high | Out-Null
+          netsh int tcp set global autotuninglevel=normal | Out-Null   # normal avoids bufferbloat on RDP; high hurts mixed interactive+bulk
           netsh int tcp set global ecncapability=disabled | Out-Null
+          netsh int tcp set global timestamps=disabled | Out-Null
+          netsh int tcp set global rss=enabled | Out-Null
+
+          # ── Kill delayed ACK on every adapter (TcpDelAckTicks=0) — cuts 200ms per round-trip ──
+          foreach ($iface in $interfaces) {
+              Set-ItemProperty -Path $iface.PSPath -Name "TcpDelAckTicks" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          }
+
+          # ── Unbind QoS Packet Scheduler from every adapter — it throttles non-multimedia traffic ──
+          Get-NetAdapter -Physical | ForEach-Object {
+              Disable-NetAdapterBinding -Name $_.Name -ComponentID 'ms_pacer' -ErrorAction SilentlyContinue
+          }
 
           # ── Provision RDP Admin ──
           if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
@@ -191,11 +210,31 @@ jobs:
           Set-ItemProperty -Path $tsPolicies -Name "KeepAliveEnable" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $tsPolicies -Name "KeepAliveInterval" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
 
-          # ── Disable unused RDP channels (less per-frame overhead) ──
-          Set-ItemProperty -Path $tsPolicies -Name "fDisableCpm" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # printer
-          Set-ItemProperty -Path $tsPolicies -Name "fDisableCdm" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # drives
+          # ── RDP virtual channels: KEEP drive + clipboard ON (this is why file copy was slow/broken) ──
+          #    fDisableCdm=1 blocked rdpdr — Explorer copy, \\tsclient, and RDP file download all crawl or fail.
+          Set-ItemProperty -Path $tsPolicies -Name "fDisableCdm" -Value 0 -Type DWord -Force   # drives ENABLED
+          Set-ItemProperty -Path $tsPolicies -Name "fDisableClip" -Value 0 -Type DWord -Force  # clipboard ENABLED
+          Set-ItemProperty -Path $tsPolicies -Name "fDisableCcm" -Value 0 -Type DWord -Force   # COM (serial/dongle tools)
+          Set-ItemProperty -Path $tsPolicies -Name "fDisableCpm" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # printer (unused)
           Set-ItemProperty -Path $tsPolicies -Name "fDisableLPT" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # LPT
           Set-ItemProperty -Path $tsPolicies -Name "fDisableAudioCapture" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── Unthrottle RDP virtual channels so file copy isn't starved by the graphics stream ──
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          if (-not (Test-Path $rdpTcp)) { New-Item -Path $rdpTcp -Force | Out-Null }
+          Set-ItemProperty -Path $rdpTcp -Name "FlowControlDisable" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path $rdpTcp -Name "SelectNetworkDetect" -Value 0 -Type DWord -Force   # don't downshift to "slow link"
+          Set-ItemProperty -Path $rdpTcp -Name "SelectTransport" -Value 0 -Type DWord -Force       # prefer UDP when available
+          Set-ItemProperty -Path $tsCtrl -Name "fSingleSessionPerUser" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── RDP-Tcp output buffer: uncap the virtual-channel send queue for bulk file transfer ──
+          Set-ItemProperty -Path $rdpTcp -Name "OutBufLength" -Value 0 -Type DWord -Force      # 0 = no cap (default 530 bytes kills throughput)
+          Set-ItemProperty -Path $rdpTcp -Name "OutBufCount" -Value 100 -Type DWord -Force     # max pending output buffers
+          Set-ItemProperty -Path $rdpTcp -Name "OutBufDelay" -Value 0 -Type DWord -Force       # 0ms coalesce delay
+
+          # ── Disable RDP compression on fast links — CPU overhead > bandwidth savings ──
+          Set-ItemProperty -Path $rdpTcp -Name "fDisableCompression" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path $rdpTcp -Name "MaxCompressionLevel" -Value 0 -Type DWord -Force
 
           # ── Tailscale direct-path firewall: open UDP 41641 so DERP relay is only a fallback ──
           New-NetFirewallRule -DisplayName "Tailscale-In-UDP" -Direction Inbound -Protocol UDP -LocalPort 41641 -Action Allow -ErrorAction SilentlyContinue | Out-Null
@@ -517,12 +556,127 @@ jobs:
 
           Write-Host "✅ Overlay armed: counts down to $env:SESSION_DEADLINE (drag to move, double-click to re-pin)." -ForegroundColor Green
 
+      # ── 2.7. WORKSTATION MODE (3rd-party software lab) ─────────────────
+      # This node is a test bench, not a locked-down runner. Installers,
+      # unsigned binaries, and RDP-copied files must just run.
+      - name: "🧪 Phase 2.7: Workstation Mode (3rd-party lab)"
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ProgressPreference = 'SilentlyContinue'
+          Write-Host "🧪 Hardening the box as a 3rd-party software workstation..." -ForegroundColor Cyan
+
+          $fabricRoot = $env:FABRIC_ROOT
+          $drop = Join-Path $fabricRoot "Drop"
+          $tools = Join-Path $fabricRoot "Tools"
+          New-Item -ItemType Directory -Path $drop, $tools -Force | Out-Null
+
+          # ── UAC: never prompt (installers that spawn child elevation won't hang) ──
+          $lu = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+          Set-ItemProperty -Path $lu -Name "EnableLUA" -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path $lu -Name "ConsentPromptBehaviorAdmin" -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path $lu -Name "PromptOnSecureDesktop" -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path $lu -Name "EnableInstallerDetection" -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path $lu -Name "FilterAdministratorToken" -Value 0 -Type DWord -Force
+
+          # ── SmartScreen / MOTW / Attachment Manager: RDP-copied EXEs must not be blocked ──
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 0 -Type DWord -Force
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoDataExecutionPrevention" -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "SmartScreenEnabled" -Value "Off" -Type String -Force
+          $attach = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments"
+          New-Item -Path $attach -Force | Out-Null
+          Set-ItemProperty -Path $attach -Name "SaveZoneInformation" -Value 1 -Type DWord -Force   # don't stamp MOTW
+          Set-ItemProperty -Path $attach -Name "ScanWithAntiVirus" -Value 1 -Type DWord -Force     # 1 = disabled
+          # Zone.Identifier strip helper for anything already copied
+          $stripMotw = @'
+          Get-ChildItem -Path 'C:\ProgramData\RDPFabric\Drop','C:\Users\FabricAdmin\Desktop','C:\Users\FabricAdmin\Downloads' -Recurse -File -ErrorAction SilentlyContinue |
+              ForEach-Object { Remove-Item -Path ($_.FullName + ':Zone.Identifier') -Force -ErrorAction SilentlyContinue }
+          '@
+          Set-Content -Path (Join-Path $fabricRoot "StripMOTW.ps1") -Value $stripMotw -Encoding UTF8
+
+          # ── Long paths + unsigned PowerShell + Explorer "Open File - Security Warning" ──
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell" -Name "ExecutionPolicy" -Value "Bypass" -Type String -Force
+          Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue
+          $ieZone = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3"
+          if (Test-Path $ieZone) { Set-ItemProperty -Path $ieZone -Name "1806" -Value 0 -Type DWord -Force }  # allow unsafe files
+
+          # ── Defender: full off + exclusions so AV never locks an installer mid-write ──
+          Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -DisableBlockAtFirstSeen $true -DisableScriptScanning $true -MAPSReporting 0 -SubmitSamplesConsent 2 -Force -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath @($fabricRoot, $drop, $tools, "C:\Users\$env:RDP_USER", "C:\Program Files", "C:\Program Files (x86)", "C:\Temp", "$env:TEMP") -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionExtension @('.exe','.msi','.msix','.appx','.dll','.sys','.bat','.cmd','.ps1','.vbs','.zip','.7z','.rar') -ErrorAction SilentlyContinue
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableAntiSpyware" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── Desktop shortcuts to the fast drop folder (use this, not C:\Users\Public) ──
+          $wsh = New-Object -ComObject WScript.Shell
+          foreach ($desk in @(
+              "C:\Users\$env:RDP_USER\Desktop",
+              "C:\Users\Public\Desktop"
+          )) {
+              if (Test-Path $desk) {
+                  $sc = $wsh.CreateShortcut((Join-Path $desk "Fabric Drop.lnk"))
+                  $sc.TargetPath = $drop
+                  $sc.Description = "Drop installers here — no MOTW, Defender-excluded, full ACL"
+                  $sc.Save()
+              }
+          }
+
+          # ── ACL: FabricAdmin + Everyone FullControl on drop/tools so copied files aren't ACL-locked ──
+          foreach ($p in @($fabricRoot, $drop, $tools)) {
+              icacls $p /grant "${env:RDP_USER}:(OI)(CI)F" /T /C /Q | Out-Null
+              icacls $p /grant "Everyone:(OI)(CI)F" /T /C /Q | Out-Null
+          }
+
+          # ── Common runtimes 3rd-party software actually needs (best-effort, never fail the job) ──
+          Write-Host "📦 Seeding VC++ / WebView2 / winget (best-effort)..." -ForegroundColor DarkCyan
+          $seed = {
+              param($tools)
+              $ProgressPreference = 'SilentlyContinue'
+              $ErrorActionPreference = 'SilentlyContinue'
+              # VC++ 2015-2022 x64 + x86 (covers ~90% of native installers)
+              $vc = @(
+                  @{ n='VC_redist.x64.exe'; u='https://aka.ms/vs/17/release/vc_redist.x64.exe' },
+                  @{ n='VC_redist.x86.exe'; u='https://aka.ms/vs/17/release/vc_redist.x86.exe' }
+              )
+              foreach ($p in $vc) {
+                  $dst = Join-Path $tools $p.n
+                  & curl.exe -sS -L --retry 2 -o $dst $p.u
+                  if (Test-Path $dst) { Start-Process -FilePath $dst -ArgumentList '/install','/quiet','/norestart' -Wait }
+              }
+              # WebView2 evergreen (Electron / many modern UIs)
+              $wv = Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe'
+              & curl.exe -sS -L --retry 2 -o $wv 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+              if (Test-Path $wv) { Start-Process -FilePath $wv -ArgumentList '/silent','/install' -Wait }
+              # .NET Desktop Runtime 8 (WinForms/WPF tools)
+              $ndp = Join-Path $tools 'windowsdesktop-runtime-8-x64.exe'
+              & curl.exe -sS -L --retry 2 -o $ndp 'https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe'
+              if (Test-Path $ndp) { Start-Process -FilePath $ndp -ArgumentList '/install','/quiet','/norestart' -Wait }
+          }
+          $seedJob = Start-Job -ScriptBlock $seed -ArgumentList $tools
+
+          # winget source refresh so `winget install` works the moment you land
+          try { winget source update --disable-interactivity 2>$null | Out-Null } catch {}
+
+          # Don't block ignition — collect the seed job with a short cap
+          $seedJob | Wait-Job -Timeout 90 | Out-Null
+          if ($seedJob.State -eq 'Running') {
+              Write-Host "⏳ Runtime seed still running in background (won't block RDP)." -ForegroundColor DarkCyan
+          } else {
+              Receive-Job $seedJob | Out-Null
+              Remove-Job $seedJob -Force
+              Write-Host "✅ Runtimes seeded." -ForegroundColor Green
+          }
+
+          Write-Host "✅ Workstation mode armed. Copy files via \\tsclient or the Fabric Drop folder." -ForegroundColor Green
+
       # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────
       - name: "📡 Phase 3: Telemetry Dispatch"
         run: |
           if ($env:TG_TOKEN -and $env:TG_CHAT) {
               $link = if ($env:TS_DIRECT -eq 'True') { "direct" } else { "relay" }
-              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n🔗 <b>Path:</b> <code>$link</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min`n⏱ <b>Overlay:</b> top-left countdown active"
+              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n🔗 <b>Path:</b> <code>$link</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min`n📁 <b>Drop:</b> <code>C:\ProgramData\RDPFabric\Drop</code>`n⏱ <b>Overlay:</b> top-left countdown active"
               $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
               Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
           } else {
