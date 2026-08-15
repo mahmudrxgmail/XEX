@@ -14,6 +14,8 @@ name: "RDP Fabric (Pure Tailscale)"
 #  ⚡ Fast RDP file copy (drive + clipboard channels, flow-control off)
 #  ⚡ Workstation mode: 3rd-party installers run without SmartScreen/UAC/MOTW fights
 #  ⚡ Heavy-workload kernel: CPU scheduler, memory manager, desktop heap, NTFS I/O
+#  ⚡ Silverbullet hardening: WER off, FTH off, AppCompat killed, heap tuned
+#  ⚡ Microsoft network: TLS 1.2, WinHTTP direct, DNS cache, Chimney off, IPv6 trans off
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -279,6 +281,131 @@ jobs:
           powercfg -setactive scheme_current | Out-Null
 
           Write-Host "✅ Heavy-workload hardening applied." -ForegroundColor Green
+
+          # ═══════════════════════════════════════════════════════════════
+          # 🎯 SILVERBULLET TOOL HARDENING (High RAM/CPU checkers)
+          # ═══════════════════════════════════════════════════════════════
+          Write-Host "🎯 Applying Silverbullet tool hardening..." -ForegroundColor Cyan
+
+          # ── Windows Error Reporting: fully off — crash dialogs hang headless tools ──
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "DontShowUI" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "LoggingDisabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Stop-Service -Name WerSvc -Force -ErrorAction SilentlyContinue
+          Set-Service -Name WerSvc -StartupType Disabled -ErrorAction SilentlyContinue
+
+          # ── Fault Tolerant Heap: OFF — Windows silently throttles "crashy" tools via FTH,
+          #    adding 10-30% overhead. Silverbullet checkers that stress RAM/CPU trigger this. ──
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\FTH" -Name "Enabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags" -Name "FTHPercent" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" -Force | Out-Null
+          Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\FTH\State" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # ── App Compat Engine / AeDebug: kill auto-debugger popups and shim interference ──
+          Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug" -Name "Debugger" -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug" -Name "Auto" -Value "0" -Type String -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat" -Name "DisableEngine" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat" -Name "DisablePCA" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── Process handle ceiling: raise from default 16M to 64M handles per process ──
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "MaxProcesses" -Value 0xFFFFFFFF -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems" -Name "MaxRequestThreads" -Value 30 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── Heap tuning: raise decommit threshold so alloc-heavy tools don't thrash ──
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" -Name "HeapDecommitFreeBlockThreshold" -Value 0x00040000 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" -Name "HeapDecommitTotalFreeThreshold" -Value 0x00100000 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          Write-Host "✅ Silverbullet hardening applied." -ForegroundColor Green
+
+          # ═══════════════════════════════════════════════════════════════
+          # 🌐 MICROSOFT NETWORK COMPATIBILITY (Zero blocks, stable outbound)
+          # ═══════════════════════════════════════════════════════════════
+          Write-Host "🌐 Applying Microsoft network compatibility hardening..." -ForegroundColor Cyan
+
+          # ── TLS 1.2: force-enable for both client and server (required by all MS cloud endpoints) ──
+          $tlsCli = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client"
+          $tlsSrv = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server"
+          foreach ($p in @($tlsCli, $tlsSrv)) {
+              New-Item -Path $p -Force | Out-Null
+              Set-ItemProperty -Path $p -Name "DisabledByDefault" -Value 0 -Type DWord -Force
+              Set-ItemProperty -Path $p -Name "Enabled" -Value 1 -Type DWord -Force
+          }
+          # Strong cipher suites for Microsoft services
+          $ciphers = "HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002"
+          New-Item -Path $ciphers -Force | Out-Null
+          Set-ItemProperty -Path $ciphers -Name "Functions" -Value "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" -Type String -Force
+
+          # ── WinHTTP: force direct (no proxy) so no tool hits a proxy PAC dead-end ──
+          netsh winhttp reset proxy | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxySettingsPerUser" -Value 0 -Type DWord -Force
+
+          # ── DNS client: enlarge cache, kill negative caching, raise concurrent queries ──
+          $dnsc = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
+          Set-ItemProperty -Path $dnsc -Name "MaxCacheTtl" -Value 86400 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dnsc -Name "MaxNegativeCacheTtl" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dnsc -Name "NegativeCacheTime" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dnsc -Name "NetFailureCacheTime" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dnsc -Name "MaxCacheEntryTtlLimit" -Value 86400 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dnsc -Name "CacheHashTableBucketSize" -Value 16 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dnsc -Name "CacheHashTableSize" -Value 32 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dnsc -Name "MaxSOACacheEntryTtlLimit" -Value 300 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── TCP Chimney Offload: DISABLE — causes packet corruption with some tools ──
+          netsh int tcp set global chimney=disabled | Out-Null
+          netsh int tcp set global rsc=disabled | Out-Null
+          netsh int tcp set global netdma=disabled | Out-Null
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnableTCPChimney" -Value 0 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnableRSS" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnableTCPA" -Value 1 -Type DWord -Force
+
+          # ── Adapter power management: OFF — NIC sleep causes 2-5s stalls ──
+          Get-NetAdapter -Physical | ForEach-Object {
+              $adapterPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\$($_.DeviceID.Substring(4))"
+              Set-ItemProperty -Path $adapterPath -Name "PnPCapabilities" -Value 24 -Type DWord -Force -ErrorAction SilentlyContinue
+              Set-ItemProperty -Path $adapterPath -Name "EnablePME" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+              Disable-NetAdapterPowerManagement -Name $_.Name -ErrorAction SilentlyContinue
+          }
+
+          # ── NetBIOS over TCP/IP: DISABLE — reduces broadcast noise, avoids name-resolution stalls ──
+          Get-NetAdapter -Physical | ForEach-Object {
+              $netbtKey = "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces\Tcpip_$($_.InterfaceGuid)"
+              if (Test-Path $netbtKey) {
+                  Set-ItemProperty -Path $netbtKey -Name "NetbiosOptions" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+              }
+          }
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters" -Name "EnableLMHOSTS" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── IPv6 transition tech: OFF — Teredo/6to4/ISATAP cause spurious timeouts ──
+          netsh interface teredo set state disabled | Out-Null
+          netsh interface 6to4 set state disabled | Out-Null
+          netsh interface isatap set state disabled | Out-Null
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0xFF -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # ── Ephemeral port range: expand + reduce TIME_WAIT so high-connection tools don't exhaust ports ──
+          netsh int ipv4 set dynamicport tcp start=1025 num=64510 | Out-Null
+          netsh int ipv4 set dynamicport udp start=1025 num=64510 | Out-Null
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "TcpTimedWaitDelay" -Value 30 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "MaxUserPort" -Value 65534 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "TcpNumConnections" -Value 0x00FFFFFE -Type DWord -Force
+
+          # ── Microsoft service endpoints: pre-warm firewall rules for common MS cloud ranges ──
+          $msRules = @(
+              @{ Name="MS-Diagnostics-Out"; Port="443"; Desc="Microsoft telemetry & diagnostics" },
+              @{ Name="MS-Update-Out"; Port="443"; Desc="Windows Update / Microsoft Update" },
+              @{ Name="MS-Defender-Cloud-Out"; Port="443"; Desc="Defender cloud protection (if re-enabled)" }
+          )
+          foreach ($r in $msRules) {
+              New-NetFirewallRule -DisplayName $r.Name -Direction Outbound -Protocol TCP -RemotePort $r.Port -Action Allow -Description $r.Desc -ErrorAction SilentlyContinue | Out-Null
+          }
+
+          # ── MTU discovery: enable (some tools break with PMTU black holes) ──
+          netsh int ipv4 set global icmpredirects=enabled | Out-Null
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnablePMTUDiscovery" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnablePMTUBHDetect" -Value 1 -Type DWord -Force
+
+          Write-Host "✅ Microsoft network compatibility applied." -ForegroundColor Green
 
           # ── Provision RDP Admin ──
           if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
