@@ -92,7 +92,7 @@ jobs:
       # ── 1. DEPENDENCY-FREE INITIALIZATION ──────────────────────────────
       # GOD MODE: Tailscale MSI download starts HERE in the background and
       # overlaps all OS tuning below — shaves ~15-25s off ignition.
-      - name: "⚡ Phase 1: Native Initialization & Optimization"
+      - name: "⚡ Phase 1a: OS Init, Power, Graphics & Network"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'   # IWR progress rendering is brutally slow without this
@@ -196,6 +196,9 @@ jobs:
 
           # ═══════════════════════════════════════════════════════════════
           # 🧠 HEAVY-WORKLOAD HARDENING (CPU / Memory / IO / Desktop Heap)
+
+      - name: "🧠 Phase 1b: Heavy-Workload, Silverbullet & MS Network"
+        run: |
           # ═══════════════════════════════════════════════════════════════
           Write-Host "🧠 Applying heavy-workload kernel hardening..." -ForegroundColor Cyan
 
@@ -408,6 +411,9 @@ jobs:
           Write-Host "✅ Microsoft network compatibility applied." -ForegroundColor Green
 
           # ── Provision RDP Admin ──
+
+      - name: "🔧 Phase 1c: RDP Provisioning, Channels & Firewall"
+        run: |
           if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
           $secPass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USER -Password $secPass -Description "Fabric RDP User" -AccountNeverExpires -ErrorAction SilentlyContinue | Out-Null
