@@ -11,11 +11,6 @@ name: "RDP Fabric (Pure Tailscale)"
 #  ⚡ Dynamic Chrome Automation (Auto-scans Extension Folder on Launch)
 #  ⚡ Floating Countdown Overlay (Small, top-left, always-on-top, draggable)
 #  ⚡ GOD MODE: Parallel ignition, 60fps DWM, direct-path UDP, watchdog
-#  ⚡ Fast RDP file copy (drive + clipboard channels, flow-control off)
-#  ⚡ Workstation mode: 3rd-party installers run without SmartScreen/UAC/MOTW fights
-#  ⚡ Heavy-workload kernel: CPU scheduler, memory manager, desktop heap, NTFS I/O
-#  ⚡ Silverbullet hardening: WER off, FTH off, AppCompat killed, heap tuned
-#  ⚡ Microsoft network: TLS 1.2, WinHTTP direct, DNS cache, Chimney off, IPv6 trans off
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
@@ -92,7 +87,7 @@ jobs:
       # ── 1. DEPENDENCY-FREE INITIALIZATION ──────────────────────────────
       # GOD MODE: Tailscale MSI download starts HERE in the background and
       # overlaps all OS tuning below — shaves ~15-25s off ignition.
-      - name: "⚡ Phase 1a: OS Init, Power, Graphics & Network"
+      - name: "⚡ Phase 1: Native Initialization & Optimization"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'   # IWR progress rendering is brutally slow without this
@@ -139,15 +134,10 @@ jobs:
           # ── Defender Mitigation ──
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
 
-          # ── Bloat only: search indexer + telemetry. NEVER kill Spooler/SysMain/DoSvc/BITS/WU —
-          #    3rd-party installers, MSI, winget, and printers depend on them.
-          foreach ($svc in 'WSearch','DiagTrack') {
+          # ── Bloat services: stop & disable (search indexing, telemetry, delivery optimization, print spooler) ──
+          foreach ($svc in 'WSearch','DiagTrack','DoSvc','Spooler','SysMain') {
               Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
               Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
-          }
-          foreach ($svc in 'Spooler','SysMain','DoSvc','wuauserv','bits','msiserver','TrustedInstaller','CryptSvc','LanmanServer','LanmanWorkstation','Winmgmt') {
-              Set-Service -Name $svc -StartupType Automatic -ErrorAction SilentlyContinue
-              Start-Service -Name $svc -ErrorAction SilentlyContinue
           }
 
           # ── RDP GRAPHICS & LATENCY OVERHAUL ──
@@ -179,241 +169,10 @@ jobs:
               Set-ItemProperty -Path $iface.PSPath -Name "TCPNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           }
           try { Set-NetTCPSetting -SettingName InternetCustom -CongestionProvider CUBIC -ErrorAction SilentlyContinue } catch {}
-          netsh int tcp set global autotuninglevel=normal | Out-Null   # normal avoids bufferbloat on RDP; high hurts mixed interactive+bulk
+          netsh int tcp set global autotuninglevel=high | Out-Null
           netsh int tcp set global ecncapability=disabled | Out-Null
-          netsh int tcp set global timestamps=disabled | Out-Null
-          netsh int tcp set global rss=enabled | Out-Null
-
-          # ── Kill delayed ACK on every adapter (TcpDelAckTicks=0) — cuts 200ms per round-trip ──
-          foreach ($iface in $interfaces) {
-              Set-ItemProperty -Path $iface.PSPath -Name "TcpDelAckTicks" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          }
-
-          # ── Unbind QoS Packet Scheduler from every adapter — it throttles non-multimedia traffic ──
-          Get-NetAdapter -Physical | ForEach-Object {
-              Disable-NetAdapterBinding -Name $_.Name -ComponentID 'ms_pacer' -ErrorAction SilentlyContinue
-          }
-
-          # ═══════════════════════════════════════════════════════════════
-          # 🧠 HEAVY-WORKLOAD HARDENING (CPU / Memory / IO / Desktop Heap)
-
-      - name: "🧠 Phase 1b: Heavy-Workload, Silverbullet & MS Network"
-        run: |
-          # ═══════════════════════════════════════════════════════════════
-          Write-Host "🧠 Applying heavy-workload kernel hardening..." -ForegroundColor Cyan
-
-          # ── CPU Scheduler: short quanta + variable foreground boost ──
-          #    0x26 = 38 decimal: short variable quanta, foreground boost on.
-          #    This is the "Programs" profile on steroids — responsive UI under load.
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -Type DWord -Force
-
-          # ── Memory Manager: keep kernel code in RAM, favor system cache ──
-          $mm = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
-          Set-ItemProperty -Path $mm -Name "DisablePagingExecutive" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path $mm -Name "LargeSystemCache" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path $mm -Name "IoPageLockLimit" -Value 0x10000000 -Type DWord -Force  # 256MB I/O lock
-          Set-ItemProperty -Path $mm -Name "SecondLevelDataCache" -Value 0x200 -Type DWord -Force  # 512KB L2 hint
-          Set-ItemProperty -Path $mm -Name "PagedPoolSize" -Value 0xFFFFFFFF -Type DWord -Force   # let OS manage
-          Set-ItemProperty -Path $mm -Name "NonPagedPoolSize" -Value 0 -Type DWord -Force         # let OS manage
-          Set-ItemProperty -Path $mm -Name "PoolUsageMaximum" -Value 60 -Type DWord -Force        # 60% pool before trimming
-          Set-ItemProperty -Path $mm -Name "SystemPages" -Value 0 -Type DWord -Force              # let OS manage
-          Set-ItemProperty -Path $mm -Name "MemoryCompression" -Value 1 -Type DWord -Force        # compress instead of page
-          Set-ItemProperty -Path $mm -Name "ClearPageFileAtShutdown" -Value 0 -Type DWord -Force  # don't waste time
-
-          # ── Desktop Heap: massive expansion so 50+ concurrent windows don't crash ──
-          #    Default SharedSection=1024,20480,768 — interactive desktop gets only 20MB.
-          #    We bump the interactive segment to 512MB so heavy GUI tools never OOM the heap.
-          $csr = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems"
-          $cur = (Get-ItemProperty -Path $csr -Name "Windows" -ErrorAction SilentlyContinue).Windows
-          if ($cur -and $cur -match 'SharedSection=(\d+),(\d+),(\d+)') {
-              $new = $cur -replace 'SharedSection=\d+,\d+,\d+', 'SharedSection=1024,20480,768'
-              Set-ItemProperty -Path $csr -Name "Windows" -Value $new -Type String -Force
-          }
-
-          # ── GDI / USER handle quotas: 65536 per process (default 10000) ──
-          Set-ItemProperty -Path $mm -Name "GDIProcessHandleQuota" -Value 65536 -Type DWord -Force
-          Set-ItemProperty -Path $mm -Name "USERProcessHandleQuota" -Value 65536 -Type DWord -Force
-
-          # ── NTFS I/O: kill last-access stamps, kill 8.3, favor memory for metadata ──
-          $fs = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
-          Set-ItemProperty -Path $fs -Name "NtfsDisableLastAccessUpdate" -Value 0x80000001 -Type DWord -Force
-          Set-ItemProperty -Path $fs -Name "NtfsDisable8dot3NameCreation" -Value 1 -Type DWord -Force
-          fsutil behavior set disablelastaccess 1 | Out-Null
-          fsutil behavior set disable8dot3 1 | Out-Null
-          fsutil behavior set memoryusage 2 | Out-Null   # favor system cache over working set
-
-          # ── IRPStackSize: deeper driver stacks for complex software ──
-          Set-ItemProperty -Path $fs -Name "IRPStackSize" -Value 50 -Type DWord -Force
-
-          # ── Hang / crash recovery: kill frozen apps fast, don't wait ──
-          $desk = "HKCU:\Control Panel\Desktop"
-          New-Item -Path $desk -Force | Out-Null
-          Set-ItemProperty -Path $desk -Name "HungAppTimeout" -Value 1000 -Type String -Force
-          Set-ItemProperty -Path $desk -Name "WaitToKillAppTimeout" -Value 1000 -Type String -Force
-          Set-ItemProperty -Path $desk -Name "WaitToKillServiceTimeout" -Value 1000 -Type String -Force
-          Set-ItemProperty -Path $desk -Name "AutoEndTasks" -Value "1" -Type String -Force
-          Set-ItemProperty -Path $desk -Name "ForegroundLockTimeout" -Value 0 -Type DWord -Force
-
-          # ── Service Host splitting: isolate services into separate svchost.exe processes ──
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control" -Name "SvcHostSplitThresholdInKB" -Value 0 -Type DWord -Force
-
-          # ── CPU Core Parking: FULLY OFF — all cores online, no C-state deep sleep ──
-          $ppKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00"
-          powercfg -setacvalueindex scheme_current sub_processor PERFBOOSTMODE 1 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PERFINCPOL 0 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PERFDECPOL 0 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PERFINCTHRESHOLD 0 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PERFDECTHRESHOLD 0 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor CPMINCORES 100 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor CPMAXCORES 100 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PERFEPP 0 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PERFAUTONOMOUS 0 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMAX 100 | Out-Null
-          powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100 | Out-Null
-          try {
-              powercfg -setacvalueindex scheme_current sub_processor 0cc5b647-c1df-4637-891a-dec35c318583 0 | Out-Null  # core parking min cores = 100%
-              powercfg -setacvalueindex scheme_current sub_processor ea062031-0e34-4ff1-9b6d-eb1059334028 0 | Out-Null  # core parking concurrency = all
-              powercfg -setacvalueindex scheme_current sub_processor 893dee8e-2bef-41e0-89c6-b55d0929964c 0 | Out-Null  # core parking min cores DC
-              powercfg -setacvalueindex scheme_current sub_processor 0cc5b647-c1df-4637-891a-dec35c318583 100 | Out-Null
-          } catch {}
-          # Disable C-States via hidden power setting
-          try {
-              powercfg -setacvalueindex scheme_current sub_sleep 7bc4a2f9-d8fc-4469-b07b-33eb785aaca0 0 | Out-Null
-              powercfg -setacvalueindex scheme_current sub_sleep d639518a-e56d-4345-8af2-b9f32fb26109 0 | Out-Null
-          } catch {}
-          powercfg -setactive scheme_current | Out-Null
-
-          Write-Host "✅ Heavy-workload hardening applied." -ForegroundColor Green
-
-          # ═══════════════════════════════════════════════════════════════
-          # 🎯 SILVERBULLET TOOL HARDENING (High RAM/CPU checkers)
-          # ═══════════════════════════════════════════════════════════════
-          Write-Host "🎯 Applying Silverbullet tool hardening..." -ForegroundColor Cyan
-
-          # ── Windows Error Reporting: fully off — crash dialogs hang headless tools ──
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "DontShowUI" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "LoggingDisabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-          Stop-Service -Name WerSvc -Force -ErrorAction SilentlyContinue
-          Set-Service -Name WerSvc -StartupType Disabled -ErrorAction SilentlyContinue
-
-          # ── Fault Tolerant Heap: OFF — Windows silently throttles "crashy" tools via FTH,
-          #    adding 10-30% overhead. Silverbullet checkers that stress RAM/CPU trigger this. ──
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\FTH" -Name "Enabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags" -Name "FTHPercent" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" -Force | Out-Null
-          Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\FTH\State" -Recurse -Force -ErrorAction SilentlyContinue
-
-          # ── App Compat Engine / AeDebug: kill auto-debugger popups and shim interference ──
-          Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug" -Name "Debugger" -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug" -Name "Auto" -Value "0" -Type String -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat" -Name "DisableEngine" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat" -Name "DisablePCA" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── Process handle ceiling: raise from default 16M to 64M handles per process ──
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "MaxProcesses" -Value 0xFFFFFFFF -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems" -Name "MaxRequestThreads" -Value 30 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── Heap tuning: raise decommit threshold so alloc-heavy tools don't thrash ──
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" -Name "HeapDecommitFreeBlockThreshold" -Value 0x00040000 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" -Name "HeapDecommitTotalFreeThreshold" -Value 0x00100000 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          Write-Host "✅ Silverbullet hardening applied." -ForegroundColor Green
-
-          # ═══════════════════════════════════════════════════════════════
-          # 🌐 MICROSOFT NETWORK COMPATIBILITY (Zero blocks, stable outbound)
-          # ═══════════════════════════════════════════════════════════════
-          Write-Host "🌐 Applying Microsoft network compatibility hardening..." -ForegroundColor Cyan
-
-          # ── TLS 1.2: force-enable for both client and server (required by all MS cloud endpoints) ──
-          $tlsCli = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client"
-          $tlsSrv = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server"
-          foreach ($p in @($tlsCli, $tlsSrv)) {
-              New-Item -Path $p -Force | Out-Null
-              Set-ItemProperty -Path $p -Name "DisabledByDefault" -Value 0 -Type DWord -Force
-              Set-ItemProperty -Path $p -Name "Enabled" -Value 1 -Type DWord -Force
-          }
-          # Strong cipher suites for Microsoft services
-          $ciphers = "HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002"
-          New-Item -Path $ciphers -Force | Out-Null
-          Set-ItemProperty -Path $ciphers -Name "Functions" -Value "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" -Type String -Force
-
-          # ── WinHTTP: force direct (no proxy) so no tool hits a proxy PAC dead-end ──
-          netsh winhttp reset proxy | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxyEnable" -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings" -Name "ProxySettingsPerUser" -Value 0 -Type DWord -Force
-
-          # ── DNS client: enlarge cache, kill negative caching, raise concurrent queries ──
-          $dnsc = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
-          Set-ItemProperty -Path $dnsc -Name "MaxCacheTtl" -Value 86400 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path $dnsc -Name "MaxNegativeCacheTtl" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path $dnsc -Name "NegativeCacheTime" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path $dnsc -Name "NetFailureCacheTime" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path $dnsc -Name "MaxCacheEntryTtlLimit" -Value 86400 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path $dnsc -Name "CacheHashTableBucketSize" -Value 16 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path $dnsc -Name "CacheHashTableSize" -Value 32 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path $dnsc -Name "MaxSOACacheEntryTtlLimit" -Value 300 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── TCP Chimney Offload: DISABLE — causes packet corruption with some tools ──
-          netsh int tcp set global chimney=disabled | Out-Null
-          netsh int tcp set global rsc=disabled | Out-Null
-          netsh int tcp set global netdma=disabled | Out-Null
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnableTCPChimney" -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnableRSS" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnableTCPA" -Value 1 -Type DWord -Force
-
-          # ── Adapter power management: OFF — NIC sleep causes 2-5s stalls ──
-          Get-NetAdapter -Physical | ForEach-Object {
-              $adapterPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\$($_.DeviceID.Substring(4))"
-              Set-ItemProperty -Path $adapterPath -Name "PnPCapabilities" -Value 24 -Type DWord -Force -ErrorAction SilentlyContinue
-              Set-ItemProperty -Path $adapterPath -Name "EnablePME" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-              Disable-NetAdapterPowerManagement -Name $_.Name -ErrorAction SilentlyContinue
-          }
-
-          # ── NetBIOS over TCP/IP: DISABLE — reduces broadcast noise, avoids name-resolution stalls ──
-          Get-NetAdapter -Physical | ForEach-Object {
-              $netbtKey = "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces\Tcpip_$($_.InterfaceGuid)"
-              if (Test-Path $netbtKey) {
-                  Set-ItemProperty -Path $netbtKey -Name "NetbiosOptions" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
-              }
-          }
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters" -Name "EnableLMHOSTS" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── IPv6 transition tech: OFF — Teredo/6to4/ISATAP cause spurious timeouts ──
-          netsh interface teredo set state disabled | Out-Null
-          netsh interface 6to4 set state disabled | Out-Null
-          netsh interface isatap set state disabled | Out-Null
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0xFF -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── Ephemeral port range: expand + reduce TIME_WAIT so high-connection tools don't exhaust ports ──
-          netsh int ipv4 set dynamicport tcp start=1025 num=64510 | Out-Null
-          netsh int ipv4 set dynamicport udp start=1025 num=64510 | Out-Null
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "TcpTimedWaitDelay" -Value 30 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "MaxUserPort" -Value 65534 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "TcpNumConnections" -Value 0x00FFFFFE -Type DWord -Force
-
-          # ── Microsoft service endpoints: pre-warm firewall rules for common MS cloud ranges ──
-          $msRules = @(
-              @{ Name="MS-Diagnostics-Out"; Port="443"; Desc="Microsoft telemetry & diagnostics" },
-              @{ Name="MS-Update-Out"; Port="443"; Desc="Windows Update / Microsoft Update" },
-              @{ Name="MS-Defender-Cloud-Out"; Port="443"; Desc="Defender cloud protection (if re-enabled)" }
-          )
-          foreach ($r in $msRules) {
-              New-NetFirewallRule -DisplayName $r.Name -Direction Outbound -Protocol TCP -RemotePort $r.Port -Action Allow -Description $r.Desc -ErrorAction SilentlyContinue | Out-Null
-          }
-
-          # ── MTU discovery: enable (some tools break with PMTU black holes) ──
-          netsh int ipv4 set global icmpredirects=enabled | Out-Null
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnablePMTUDiscovery" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnablePMTUBHDetect" -Value 1 -Type DWord -Force
-
-          Write-Host "✅ Microsoft network compatibility applied." -ForegroundColor Green
 
           # ── Provision RDP Admin ──
-
-      - name: "🔧 Phase 1c: RDP Provisioning, Channels & Firewall"
-        run: |
           if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
           $secPass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USER -Password $secPass -Description "Fabric RDP User" -AccountNeverExpires -ErrorAction SilentlyContinue | Out-Null
@@ -432,31 +191,11 @@ jobs:
           Set-ItemProperty -Path $tsPolicies -Name "KeepAliveEnable" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $tsPolicies -Name "KeepAliveInterval" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
 
-          # ── RDP virtual channels: KEEP drive + clipboard ON (this is why file copy was slow/broken) ──
-          #    fDisableCdm=1 blocked rdpdr — Explorer copy, \\tsclient, and RDP file download all crawl or fail.
-          Set-ItemProperty -Path $tsPolicies -Name "fDisableCdm" -Value 0 -Type DWord -Force   # drives ENABLED
-          Set-ItemProperty -Path $tsPolicies -Name "fDisableClip" -Value 0 -Type DWord -Force  # clipboard ENABLED
-          Set-ItemProperty -Path $tsPolicies -Name "fDisableCcm" -Value 0 -Type DWord -Force   # COM (serial/dongle tools)
-          Set-ItemProperty -Path $tsPolicies -Name "fDisableCpm" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # printer (unused)
+          # ── Disable unused RDP channels (less per-frame overhead) ──
+          Set-ItemProperty -Path $tsPolicies -Name "fDisableCpm" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # printer
+          Set-ItemProperty -Path $tsPolicies -Name "fDisableCdm" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # drives
           Set-ItemProperty -Path $tsPolicies -Name "fDisableLPT" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue  # LPT
           Set-ItemProperty -Path $tsPolicies -Name "fDisableAudioCapture" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── Unthrottle RDP virtual channels so file copy isn't starved by the graphics stream ──
-          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-          if (-not (Test-Path $rdpTcp)) { New-Item -Path $rdpTcp -Force | Out-Null }
-          Set-ItemProperty -Path $rdpTcp -Name "FlowControlDisable" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path $rdpTcp -Name "SelectNetworkDetect" -Value 0 -Type DWord -Force   # don't downshift to "slow link"
-          Set-ItemProperty -Path $rdpTcp -Name "SelectTransport" -Value 0 -Type DWord -Force       # prefer UDP when available
-          Set-ItemProperty -Path $tsCtrl -Name "fSingleSessionPerUser" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── RDP-Tcp output buffer: uncap the virtual-channel send queue for bulk file transfer ──
-          Set-ItemProperty -Path $rdpTcp -Name "OutBufLength" -Value 0 -Type DWord -Force      # 0 = no cap (default 530 bytes kills throughput)
-          Set-ItemProperty -Path $rdpTcp -Name "OutBufCount" -Value 100 -Type DWord -Force     # max pending output buffers
-          Set-ItemProperty -Path $rdpTcp -Name "OutBufDelay" -Value 0 -Type DWord -Force       # 0ms coalesce delay
-
-          # ── Disable RDP compression on fast links — CPU overhead > bandwidth savings ──
-          Set-ItemProperty -Path $rdpTcp -Name "fDisableCompression" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path $rdpTcp -Name "MaxCompressionLevel" -Value 0 -Type DWord -Force
 
           # ── Tailscale direct-path firewall: open UDP 41641 so DERP relay is only a fallback ──
           New-NetFirewallRule -DisplayName "Tailscale-In-UDP" -Direction Inbound -Protocol UDP -LocalPort 41641 -Action Allow -ErrorAction SilentlyContinue | Out-Null
@@ -778,127 +517,12 @@ jobs:
 
           Write-Host "✅ Overlay armed: counts down to $env:SESSION_DEADLINE (drag to move, double-click to re-pin)." -ForegroundColor Green
 
-      # ── 2.7. WORKSTATION MODE (3rd-party software lab) ─────────────────
-      # This node is a test bench, not a locked-down runner. Installers,
-      # unsigned binaries, and RDP-copied files must just run.
-      - name: "🧪 Phase 2.7: Workstation Mode (3rd-party lab)"
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $ProgressPreference = 'SilentlyContinue'
-          Write-Host "🧪 Hardening the box as a 3rd-party software workstation..." -ForegroundColor Cyan
-
-          $fabricRoot = $env:FABRIC_ROOT
-          $drop = Join-Path $fabricRoot "Drop"
-          $tools = Join-Path $fabricRoot "Tools"
-          New-Item -ItemType Directory -Path $drop, $tools -Force | Out-Null
-
-          # ── UAC: never prompt (installers that spawn child elevation won't hang) ──
-          $lu = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
-          Set-ItemProperty -Path $lu -Name "EnableLUA" -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $lu -Name "ConsentPromptBehaviorAdmin" -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $lu -Name "PromptOnSecureDesktop" -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $lu -Name "EnableInstallerDetection" -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $lu -Name "FilterAdministratorToken" -Value 0 -Type DWord -Force
-
-          # ── SmartScreen / MOTW / Attachment Manager: RDP-copied EXEs must not be blocked ──
-          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 0 -Type DWord -Force
-          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" -Name "NoDataExecutionPrevention" -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "SmartScreenEnabled" -Value "Off" -Type String -Force
-          $attach = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments"
-          New-Item -Path $attach -Force | Out-Null
-          Set-ItemProperty -Path $attach -Name "SaveZoneInformation" -Value 1 -Type DWord -Force   # don't stamp MOTW
-          Set-ItemProperty -Path $attach -Name "ScanWithAntiVirus" -Value 1 -Type DWord -Force     # 1 = disabled
-          # Zone.Identifier strip helper for anything already copied
-          $stripMotw = @'
-          Get-ChildItem -Path 'C:\ProgramData\RDPFabric\Drop','C:\Users\FabricAdmin\Desktop','C:\Users\FabricAdmin\Downloads' -Recurse -File -ErrorAction SilentlyContinue |
-              ForEach-Object { Remove-Item -Path ($_.FullName + ':Zone.Identifier') -Force -ErrorAction SilentlyContinue }
-          '@
-          Set-Content -Path (Join-Path $fabricRoot "StripMOTW.ps1") -Value $stripMotw -Encoding UTF8
-
-          # ── Long paths + unsigned PowerShell + Explorer "Open File - Security Warning" ──
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell" -Name "ExecutionPolicy" -Value "Bypass" -Type String -Force
-          Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue
-          $ieZone = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\3"
-          if (Test-Path $ieZone) { Set-ItemProperty -Path $ieZone -Name "1806" -Value 0 -Type DWord -Force }  # allow unsafe files
-
-          # ── Defender: full off + exclusions so AV never locks an installer mid-write ──
-          Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -DisableBlockAtFirstSeen $true -DisableScriptScanning $true -MAPSReporting 0 -SubmitSamplesConsent 2 -Force -ErrorAction SilentlyContinue
-          Add-MpPreference -ExclusionPath @($fabricRoot, $drop, $tools, "C:\Users\$env:RDP_USER", "C:\Program Files", "C:\Program Files (x86)", "C:\Temp", "$env:TEMP") -ErrorAction SilentlyContinue
-          Add-MpPreference -ExclusionExtension @('.exe','.msi','.msix','.appx','.dll','.sys','.bat','.cmd','.ps1','.vbs','.zip','.7z','.rar') -ErrorAction SilentlyContinue
-          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableAntiSpyware" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          # ── Desktop shortcuts to the fast drop folder (use this, not C:\Users\Public) ──
-          $wsh = New-Object -ComObject WScript.Shell
-          foreach ($desk in @(
-              "C:\Users\$env:RDP_USER\Desktop",
-              "C:\Users\Public\Desktop"
-          )) {
-              if (Test-Path $desk) {
-                  $sc = $wsh.CreateShortcut((Join-Path $desk "Fabric Drop.lnk"))
-                  $sc.TargetPath = $drop
-                  $sc.Description = "Drop installers here — no MOTW, Defender-excluded, full ACL"
-                  $sc.Save()
-              }
-          }
-
-          # ── ACL: FabricAdmin + Everyone FullControl on drop/tools so copied files aren't ACL-locked ──
-          foreach ($p in @($fabricRoot, $drop, $tools)) {
-              icacls $p /grant "${env:RDP_USER}:(OI)(CI)F" /T /C /Q | Out-Null
-              icacls $p /grant "Everyone:(OI)(CI)F" /T /C /Q | Out-Null
-          }
-
-          # ── Common runtimes 3rd-party software actually needs (best-effort, never fail the job) ──
-          Write-Host "📦 Seeding VC++ / WebView2 / winget (best-effort)..." -ForegroundColor DarkCyan
-          $seed = {
-              param($tools)
-              $ProgressPreference = 'SilentlyContinue'
-              $ErrorActionPreference = 'SilentlyContinue'
-              # VC++ 2015-2022 x64 + x86 (covers ~90% of native installers)
-              $vc = @(
-                  @{ n='VC_redist.x64.exe'; u='https://aka.ms/vs/17/release/vc_redist.x64.exe' },
-                  @{ n='VC_redist.x86.exe'; u='https://aka.ms/vs/17/release/vc_redist.x86.exe' }
-              )
-              foreach ($p in $vc) {
-                  $dst = Join-Path $tools $p.n
-                  & curl.exe -sS -L --retry 2 -o $dst $p.u
-                  if (Test-Path $dst) { Start-Process -FilePath $dst -ArgumentList '/install','/quiet','/norestart' -Wait }
-              }
-              # WebView2 evergreen (Electron / many modern UIs)
-              $wv = Join-Path $tools 'MicrosoftEdgeWebview2Setup.exe'
-              & curl.exe -sS -L --retry 2 -o $wv 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
-              if (Test-Path $wv) { Start-Process -FilePath $wv -ArgumentList '/silent','/install' -Wait }
-              # .NET Desktop Runtime 8 (WinForms/WPF tools)
-              $ndp = Join-Path $tools 'windowsdesktop-runtime-8-x64.exe'
-              & curl.exe -sS -L --retry 2 -o $ndp 'https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe'
-              if (Test-Path $ndp) { Start-Process -FilePath $ndp -ArgumentList '/install','/quiet','/norestart' -Wait }
-          }
-          $seedJob = Start-Job -ScriptBlock $seed -ArgumentList $tools
-
-          # winget source refresh so `winget install` works the moment you land
-          try { winget source update --disable-interactivity 2>$null | Out-Null } catch {}
-
-          # Don't block ignition — collect the seed job with a short cap
-          $seedJob | Wait-Job -Timeout 90 | Out-Null
-          if ($seedJob.State -eq 'Running') {
-              Write-Host "⏳ Runtime seed still running in background (won't block RDP)." -ForegroundColor DarkCyan
-          } else {
-              Receive-Job $seedJob | Out-Null
-              Remove-Job $seedJob -Force
-              Write-Host "✅ Runtimes seeded." -ForegroundColor Green
-          }
-
-          Write-Host "✅ Workstation mode armed. Copy files via \\tsclient or the Fabric Drop folder." -ForegroundColor Green
-
       # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────
       - name: "📡 Phase 3: Telemetry Dispatch"
         run: |
           if ($env:TG_TOKEN -and $env:TG_CHAT) {
               $link = if ($env:TS_DIRECT -eq 'True') { "direct" } else { "relay" }
-              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n🔗 <b>Path:</b> <code>$link</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min`n📁 <b>Drop:</b> <code>C:\ProgramData\RDPFabric\Drop</code>`n⏱ <b>Overlay:</b> top-left countdown active"
+              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n🔗 <b>Path:</b> <code>$link</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min`n⏱ <b>Overlay:</b> top-left countdown active"
               $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
               Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
           } else {
