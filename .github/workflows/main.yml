@@ -122,9 +122,9 @@ jobs:
           $ultimate = (powercfg /list | Select-String "Ultimate Performance") -replace '.*GUID:\s*([a-f0-9-]+).*','$1'
           if ($ultimate) { powercfg -setactive $ultimate } else { powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c }
 
+          # Defender Mitigation: Use reg.exe for TrustedInstaller-locked keys
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
-          New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features" -Name "TamperProtection" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+          reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /t REG_DWORD /d 0 /f 2>$null | Out-Null
 
           foreach ($svc in 'WSearch','DiagTrack') {
               Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
@@ -642,8 +642,8 @@ jobs:
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -DisableBlockAtFirstSeen $true -DisableScriptScanning $true -MAPSReporting 0 -SubmitSamplesConsent 2 -Force -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionPath @($fabricRoot, $drop, $tools, "C:\Users\$env:RDP_USER", "C:\Program Files", "C:\Program Files (x86)", "C:\Temp", "$env:TEMP") -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionExtension @('.exe','.msi','.msix','.appx','.dll','.sys','.bat','.cmd','.ps1','.vbs','.zip','.7z','.rar') -ErrorAction SilentlyContinue
-          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableAntiSpyware" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          # Use reg.exe for Defender policy keys as well to avoid TrustedInstaller ACL blocks
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f 2>$null | Out-Null
 
           $wsh = New-Object -ComObject WScript.Shell
           foreach ($desk in @("C:\Users\$env:RDP_USER\Desktop", "C:\Users\Public\Desktop")) {
