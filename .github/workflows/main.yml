@@ -3,20 +3,6 @@ name: "RDP Fabric (Pure Tailscale)"
 # ═══════════════════════════════════════════════════════════════════════════
 #  TAILSCALE RDP FABRIC — Flagship Architecture (High-Performance)
 # ═══════════════════════════════════════════════════════════════════════════
-#  ⚡ Pure Tailscale Architecture (Zero CRD/RustDesk cruft)
-#  ⚡ Ephemeral Nodes (Auto-purges from Tailnet on exit — No API needed)
-#  ⚡ Native GH CLI Handoff (Failsafe recursive cycle dispatch)
-#  ⚡ Sub-60 Second Ignition (Zero 3rd-party dependencies)
-#  ⚡ Kernel Optimized (RDP-UDP, TCP CUBIC, Nagle's Demolition, Defender Off)
-#  ⚡ Dynamic Chrome Automation (Auto-scans Extension Folder on Launch)
-#  ⚡ Floating Countdown Overlay (Small, top-left, always-on-top, draggable)
-#  ⚡ GOD MODE: Parallel ignition, 60fps DWM, direct-path UDP, watchdog
-#  ⚡ Fast RDP file copy (drive + clipboard channels, flow-control off)
-#  ⚡ Workstation mode: 3rd-party installers run without SmartScreen/UAC/MOTW fights
-#  ⚡ Heavy-workload kernel: CPU scheduler, memory manager, desktop heap, NTFS I/O
-#  ⚡ Silverbullet hardening: WER off, FTH off, AppCompat killed, heap tuned
-#  ⚡ Microsoft network: TLS 1.2, WinHTTP direct, DNS cache, Chimney off, IPv6 trans off
-# ═══════════════════════════════════════════════════════════════════════════
 
 on:
   workflow_dispatch:
@@ -42,13 +28,16 @@ on:
 
 permissions:
   contents: read
-  actions: write # Required for self-dispatching cycles
+  actions: write
 
 defaults:
   run:
     shell: pwsh
 
 jobs:
+  # ═══════════════════════════════════════════════════════════════════════
+  # ⚙️ PART 1: MATRIX GENERATOR
+  # ═══════════════════════════════════════════════════════════════════════
   orchestrate:
     runs-on: ubuntu-latest
     outputs:
@@ -64,6 +53,9 @@ jobs:
           echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
           echo "Orchestrating $count runner(s)."
 
+  # ═══════════════════════════════════════════════════════════════════════
+  # 🚀 PART 2: CORE RUNNER (Split into sequential steps for stability)
+  # ═══════════════════════════════════════════════════════════════════════
   fabric:
     needs: orchestrate
     runs-on: windows-latest
@@ -83,16 +75,23 @@ jobs:
       RUN_ID: ${{ github.run_id }}
       FABRIC_ROOT: "C:\\ProgramData\\RDPFabric"
       GH_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
+      INPUT_RUNTIME_MIN: ${{ inputs.runtime_minutes }}
+      INPUT_QUICK_TEST: ${{ inputs.quick_test }}
+      INPUT_CYCLES: ${{ inputs.cycles }}
+      GH_WORKFLOW: ${{ github.workflow }}
+      GH_REF: ${{ github.ref_name }}
+      GH_INSTANCE_COUNT: ${{ inputs.instance_count }}
 
     steps:
-      - name: "⚡ Phase 1: Native Initialization & Optimization"
+      # ── STEP 1: INIT & BACKGROUND DOWNLOAD ──────────────────────────────
+      - name: "⚡ Step 1: Init & Background Download"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
           Write-Host "🚀 INITIALIZING TAILSCALE FABRIC..." -ForegroundColor Cyan
 
-          $runtime = [int]"${{ inputs.runtime_minutes }}"
-          if ("${{ inputs.quick_test }}" -eq "true") { $runtime = 5 }
+          $runtime = [int]$env:INPUT_RUNTIME_MIN
+          if ($env:INPUT_QUICK_TEST -eq "true") { $runtime = 5 }
           if ($runtime -gt 345) { $runtime = 345 }
           if ($runtime -lt 1) { $runtime = 1 }
           "SESSION_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
@@ -101,7 +100,6 @@ jobs:
           $deadline = (Get-Date).AddMinutes($runtime)
           $deadline.ToString('o') | Set-Content -Path (Join-Path $env:FABRIC_ROOT 'deadline.txt') -Encoding ASCII -Force
           "SESSION_DEADLINE=$($deadline.ToString('o'))" | Out-File -Append $env:GITHUB_ENV
-          Write-Host "⏳ Session budget: $runtime min (ends $($deadline.ToString('HH:mm:ss')))" -ForegroundColor Cyan
 
           $installer = "$env:TEMP\tailscale.msi"
           $dlJob = Start-Job -ScriptBlock {
@@ -136,42 +134,18 @@ jobs:
               Set-Service -Name $svc -StartupType Automatic -ErrorAction SilentlyContinue
               Start-Service -Name $svc -ErrorAction SilentlyContinue
           }
+          Write-Host "✅ Step 1 Complete." -ForegroundColor Green
+
+      # ── STEP 2: KERNEL & CPU HARDENING ──────────────────────────────────
+      - name: "🧠 Step 2: Kernel & CPU Hardening"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "🧠 Applying heavy-workload kernel hardening..." -ForegroundColor Cyan
 
           $TimerCode = 'using System; using System.Runtime.InteropServices; public class TimerRes { [DllImport("ntdll.dll", SetLastError = true)] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution); }'
           Add-Type -TypeDefinition $TimerCode
           [TimerRes]::NtSetTimerResolution(5000, $true, [ref]0) | Out-Null
 
-          $tsPolicies = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-          if (-not (Test-Path $tsPolicies)) { New-Item -Path $tsPolicies -Force | Out-Null }
-          Set-ItemProperty -Path $tsPolicies -Name "fEnableH264" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path $tsPolicies -Name "fEnableH264444" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path $tsPolicies -Name "RemoteDesktopProfile" -Value 1 -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force -ErrorAction SilentlyContinue
-
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Dwm" -Name "DWMFRAMEINTERVAL" -Value 15 -Type DWord -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Dwm" -Name "OverlayTestMode" -Value 5 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Type DWord -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 0 -Type DWord -Force
-
-          $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
-          foreach ($iface in $interfaces) {
-              $path = $iface.PSPath -replace "Microsoft.PowerShell.Core\\Registry::", ""
-              reg add "$path" /v TcpAckFrequency /t REG_DWORD /d 1 /f | Out-Null
-              reg add "$path" /v TCPNoDelay /t REG_DWORD /d 1 /f | Out-Null
-              reg add "$path" /v TcpDelAckTicks /t REG_DWORD /d 0 /f | Out-Null
-          }
-          try { Set-NetTCPSetting -SettingName InternetCustom -CongestionProvider CUBIC -ErrorAction SilentlyContinue } catch {}
-          netsh int tcp set global autotuninglevel=normal | Out-Null
-          netsh int tcp set global ecncapability=disabled | Out-Null
-          netsh int tcp set global timestamps=disabled | Out-Null
-          netsh int tcp set global rss=enabled | Out-Null
-
-          Get-NetAdapter -Physical | ForEach-Object {
-              Disable-NetAdapterBinding -Name $_.Name -ComponentID 'ms_pacer' -ErrorAction SilentlyContinue
-          }
-
-          Write-Host "🧠 Applying heavy-workload kernel hardening..." -ForegroundColor Cyan
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -Type DWord -Force
 
           $mm = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
@@ -202,7 +176,6 @@ jobs:
           fsutil behavior set disablelastaccess 1 | Out-Null
           fsutil behavior set disable8dot3 1 | Out-Null
           fsutil behavior set memoryusage 2 | Out-Null
-
           Set-ItemProperty -Path $fs -Name "IRPStackSize" -Value 50 -Type DWord -Force
 
           $desk = "HKCU:\Control Panel\Desktop"
@@ -237,9 +210,13 @@ jobs:
               powercfg -setacvalueindex scheme_current sub_sleep d639518a-e56d-4345-8af2-b9f32fb26109 0 | Out-Null
           } catch {}
           powercfg -setactive scheme_current | Out-Null
+          Write-Host "✅ Step 2 Complete." -ForegroundColor Green
 
-          Write-Host "✅ Heavy-workload hardening applied." -ForegroundColor Green
-          Write-Host "🎯 Applying Silverbullet tool hardening..." -ForegroundColor Cyan
+      # ── STEP 3: NETWORK & SILVERBULLET HARDENING ────────────────────────
+      - name: "🌐 Step 3: Network & Silverbullet Hardening"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "🎯 Applying Silverbullet & Network hardening..." -ForegroundColor Cyan
 
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "DontShowUI" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -263,9 +240,6 @@ jobs:
 
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" -Name "HeapDecommitFreeBlockThreshold" -Value 0x00040000 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options" -Name "HeapDecommitTotalFreeThreshold" -Value 0x00100000 -Type DWord -Force -ErrorAction SilentlyContinue
-
-          Write-Host "✅ Silverbullet hardening applied." -ForegroundColor Green
-          Write-Host "🌐 Applying Microsoft network compatibility hardening..." -ForegroundColor Cyan
 
           $tlsCli = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client"
           $tlsSrv = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server"
@@ -337,8 +311,13 @@ jobs:
           netsh int ipv4 set global icmpredirects=enabled | Out-Null
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnablePMTUDiscovery" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "EnablePMTUBHDetect" -Value 1 -Type DWord -Force
+          Write-Host "✅ Step 3 Complete." -ForegroundColor Green
 
-          Write-Host "✅ Microsoft network compatibility applied." -ForegroundColor Green
+      # ── STEP 4: RDP PROVISIONING ────────────────────────────────────────
+      - name: "🖥️ Step 4: RDP Provisioning"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "🖥️ Provisioning RDP Admin..." -ForegroundColor Cyan
 
           if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
           $secPass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
@@ -347,6 +326,9 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER -ErrorAction SilentlyContinue
 
           $tsCtrl = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+          $tsPolicies = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (-not (Test-Path $tsPolicies)) { New-Item -Path $tsPolicies -Force | Out-Null }
+
           Set-ItemProperty -Path $tsCtrl -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path $tsPolicies -Name "fClientDisableUDP" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
@@ -382,9 +364,10 @@ jobs:
           Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x01,0x80,0x10,0x00,0x00,0x00)) -Force -ErrorAction SilentlyContinue
 
           New-NetFirewallRule -DisplayName "Tailscale-In-UDP" -Direction Inbound -Protocol UDP -LocalPort 41641 -Action Allow -ErrorAction SilentlyContinue | Out-Null
-          Write-Host "✅ OS Layer Optimized. RDP Ready." -ForegroundColor Green
+          Write-Host "✅ Step 4 Complete." -ForegroundColor Green
 
-      - name: "🌐 Phase 2: Tailscale Ephemeral Mesh"
+      # ── STEP 5: TAILSCALE MESH ──────────────────────────────────────────
+      - name: "🌐 Step 5: Tailscale Ephemeral Mesh"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
@@ -431,7 +414,8 @@ jobs:
           $tsStatus = (& $tsPath status 2>$null | Out-String)
           "TS_DIRECT=$($tsStatus -notmatch 'relay')" | Out-File -Append $env:GITHUB_ENV
 
-      - name: "🧩 Phase 2.5: Dynamic Chrome Bootstrap & Bookmarks"
+      # ── STEP 6: CHROME AUTOMATION ───────────────────────────────────────
+      - name: "🧩 Step 6: Dynamic Chrome Bootstrap & Bookmarks"
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "🧩 Setting up Dynamic Chrome Bootstrap..." -ForegroundColor Cyan
@@ -508,9 +492,10 @@ jobs:
           $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
           $acl.AddAccessRule($rule)
           Set-Acl -Path $fabricRoot -AclObject $acl
-          Write-Host "✅ Chrome Automation Complete." -ForegroundColor Green
+          Write-Host "✅ Step 6 Complete." -ForegroundColor Green
 
-      - name: "⏱️ Phase 2.6: Floating Timer Overlay (Top-Left)"
+      # ── STEP 7: FLOATING COUNTDOWN OVERLAY ──────────────────────────────
+      - name: "⏱️ Step 7: Floating Timer Overlay (Top-Left)"
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "⏱️ Installing floating countdown overlay..." -ForegroundColor Cyan
@@ -613,9 +598,10 @@ jobs:
           if (Test-Path $startupDir) {
               Copy-Item -Path $timerLauncher -Destination (Join-Path $startupDir "FabricTimer.vbs") -Force -ErrorAction SilentlyContinue
           }
-          Write-Host "✅ Overlay armed: counts down to $env:SESSION_DEADLINE." -ForegroundColor Green
+          Write-Host "✅ Step 7 Complete." -ForegroundColor Green
 
-      - name: "🧪 Phase 2.7: Workstation Mode (3rd-party lab)"
+      # ── STEP 8: WORKSTATION MODE ────────────────────────────────────────
+      - name: "🧪 Step 8: Workstation Mode (3rd-party lab)"
         run: |
           $ErrorActionPreference = 'Continue'
           $ProgressPreference = 'SilentlyContinue'
@@ -713,9 +699,10 @@ jobs:
               Remove-Job $seedJob -Force
               Write-Host "✅ Runtimes seeded." -ForegroundColor Green
           }
-          Write-Host "✅ Workstation mode armed. Copy files via \\tsclient or the Fabric Drop folder." -ForegroundColor Green
+          Write-Host "✅ Step 8 Complete." -ForegroundColor Green
 
-      - name: "📡 Phase 3: Telemetry Dispatch"
+      # ── STEP 9: TELEMETRY DISPATCH ──────────────────────────────────────
+      - name: "📡 Step 9: Telemetry Dispatch"
         run: |
           if ($env:TG_TOKEN -and $env:TG_CHAT) {
               $link = if ($env:TS_DIRECT -eq 'True') { "direct" } else { "relay" }
@@ -730,7 +717,8 @@ jobs:
               Write-Host "=========================================="
           }
 
-      - name: "⏳ Phase 4: Session Hold & Cycle Handoff"
+      # ── STEP 10: SESSION HOLD & CYCLE HANDOFF ───────────────────────────
+      - name: "⏳ Step 10: Session Hold & Cycle Handoff"
         run: |
           $ErrorActionPreference = 'Continue'
           $minutes = [int]$env:SESSION_MINUTES
@@ -759,7 +747,7 @@ jobs:
               Write-Host "Heartbeat: Node $env:TS_HOSTNAME active | TS:$($tsOk ? 'ok' : 'recovering') RDP:$($rdpOk ? 'ok' : 'recovering') | $remaining min left"
           }
 
-          $cycles = [int]"${{ inputs.cycles }}"
+          $cycles = [int]$env:INPUT_CYCLES
           if ($cycles -gt 0) {
               $next = $cycles - 1
               Write-Host "🔄 Initiating Cycle Handoff (Remaining: $next)..." -ForegroundColor Yellow
@@ -771,7 +759,7 @@ jobs:
 
               $dispatched = $false
               for ($attempt = 1; $attempt -le 3 -and -not $dispatched; $attempt++) {
-                  gh workflow run "${{ github.workflow }}" --ref "${{ github.ref_name }}" -f instance_count="${{ inputs.instance_count }}" -f runtime_minutes="${{ inputs.runtime_minutes }}" -f quick_test="${{ inputs.quick_test }}" -f cycles="$next"
+                  gh workflow run "$env:GH_WORKFLOW" --ref "$env:GH_REF" -f instance_count="$env:GH_INSTANCE_COUNT" -f runtime_minutes="$env:INPUT_RUNTIME_MIN" -f quick_test="$env:INPUT_QUICK_TEST" -f cycles="$next"
                   if ($LASTEXITCODE -eq 0) {
                       $dispatched = $true
                       Write-Host "✅ Handoff successfully dispatched (attempt $attempt)!" -ForegroundColor Green
@@ -785,7 +773,8 @@ jobs:
               Write-Host "🛑 No cycles remaining. Shutting down gracefully."
           }
 
-      - name: "🧹 Phase 5: Ephemeral Teardown"
+      # ── STEP 11: TEARDOWN ───────────────────────────────────────────────
+      - name: "🧹 Step 11: Ephemeral Teardown"
         if: always()
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
