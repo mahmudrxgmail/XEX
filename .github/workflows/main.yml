@@ -1,4 +1,7 @@
-name: "RDP Fabric (Pure Tailscale)"
+# rdp.yml
+
+```yaml
+name: RDP Fabric - Tailscale
 
 on:
   workflow_dispatch:
@@ -8,79 +11,266 @@ on:
         required: true
         default: "1"
         type: choice
-        options: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
+          - "6"
+          - "7"
+          - "8"
+          - "9"
+          - "10"
+
       runtime_minutes:
-        description: "Session duration in minutes (max 345)"
+        description: "Session duration in minutes (1-345)"
         required: true
-        default: "345"
-      cycles:
-        description: "Number of automated respawn cycles left (0 = stop)"
-        required: false
-        default: "0"
+        default: "60"
+        type: string
+
       quick_test:
-        description: "Run 5-minute smoke test"
-        type: boolean
+        description: "Run a 5-minute smoke test"
+        required: false
         default: false
+        type: boolean
 
 permissions:
   contents: read
-  actions: write
 
 defaults:
   run:
     shell: pwsh
 
 jobs:
+
   orchestrate:
+    name: Generate Runner Matrix
     runs-on: ubuntu-latest
+
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
     steps:
-      - id: set-matrix
-        name: Generate Runner Matrix
+      - name: Generate Matrix
+        id: matrix
         shell: bash
         run: |
-          count=${{ inputs.instance_count }}
-          matrix_json=$(seq 1 $count | jq -R . | jq -s -c '{id: .}')
-          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
-          echo "Orchestrating $count runner(s)."
+          set -euo pipefail
+
+          count="${{ inputs.instance_count }}"
+
+          if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+            echo "Invalid instance count."
+            exit 1
+          fi
+
+          if [ "$count" -lt 1 ] || [ "$count" -gt 10 ]; then
+            echo "Instance count must be between 1 and 10."
+            exit 1
+          fi
+
+          matrix_json="$(
+            seq 1 "$count" |
+            jq -R . |
+            jq -s -c '{id: .}'
+          )"
+
+          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
+
+          echo "Creating $count runner(s)."
 
   fabric:
+    name: Fabric Node ${{ matrix.id }}
+
     needs: orchestrate
+
     runs-on: windows-latest
+
     strategy:
-      matrix: ${{ fromJson(needs.orchestrate.outputs.matrix) }}
-      max-parallel: 10
       fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJson(needs.orchestrate.outputs.matrix) }}
+
     timeout-minutes: 360
 
     env:
       TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       RDP_PASS: ${{ secrets.RDP_PASSWORD }}
-      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-      GH_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
-      RDP_USER: "FabricAdmin"
+
+      RDP_USER: FabricAdmin
+
       MATRIX_ID: ${{ matrix.id }}
       RUN_ID: ${{ github.run_id }}
+
       RUNTIME_MINUTES: ${{ inputs.runtime_minutes }}
       QUICK_TEST: ${{ inputs.quick_test }}
-      CYCLES: ${{ inputs.cycles }}
-      WORKFLOW_REF: ${{ github.workflow }}
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Phase 1 & 2: Fabric Ignition & Optimization
+      - name: Validate Environment
         run: |
-          & ./scripts/fabric-engine.ps1 -Phase Setup
+          $ErrorActionPreference = "Stop"
 
-      - name: Phase 3 & 4: Session Hold & Watchdog
+          Write-Host "======================================"
+          Write-Host " Environment Validation"
+          Write-Host "======================================"
+
+          if (-not $env:TS_AUTHKEY) {
+            throw "TAILSCALE_AUTH_KEY secret is missing."
+          }
+
+          if (-not $env:RDP_PASS) {
+            throw "RDP_PASSWORD secret is missing."
+          }
+
+          $scriptPath = Join-Path $PWD "scripts\fabric-engine.ps1"
+
+          if (-not (Test-Path $scriptPath)) {
+            throw "Missing: $scriptPath"
+          }
+
+          $runtime = 0
+
+          if (-not [int]::TryParse(
+              $env:RUNTIME_MINUTES,
+              [ref]$runtime
+          )) {
+            throw "runtime_minutes must be an integer."
+          }
+
+          if ($env:QUICK_TEST -eq "true") {
+            $runtime = 5
+          }
+
+          if ($runtime -lt 1 -or $runtime -gt 345) {
+            throw "Runtime must be between 1 and 345 minutes."
+          }
+
+          Write-Host "Node:       $env:MATRIX_ID"
+          Write-Host "Run ID:     $env:RUN_ID"
+          Write-Host "Runtime:    $runtime minutes"
+          Write-Host "Validation: OK"
+
+      - name: Setup Fabric
         run: |
-          & ./scripts/fabric-engine.ps1 -Phase Watchdog
+          $ErrorActionPreference = "Stop"
 
-      - name: Phase 5: Ephemeral Teardown
+          & "$PWD\scripts\fabric-engine.ps1" -Phase Setup
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Fabric setup failed."
+          }
+
+      - name: Network Health Check
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "======================================"
+          Write-Host " Network Health"
+          Write-Host "======================================"
+
+          Write-Host "`nTCP configuration:"
+          netsh interface tcp show global
+
+          Write-Host "`nDNS configuration:"
+          Get-DnsClientServerAddress |
+            Format-Table -AutoSize
+
+          Write-Host "`nInternet connectivity:"
+
+          $test = Test-NetConnection `
+            -ComputerName "1.1.1.1" `
+            -Port 443 `
+            -WarningAction SilentlyContinue
+
+          if ($test.TcpTestSucceeded) {
+            Write-Host "HTTPS connectivity: OK"
+          }
+          else {
+            Write-Warning "HTTPS connectivity test failed."
+          }
+
+      - name: Tailscale Status
+        run: |
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $ts)) {
+            throw "Tailscale is not installed."
+          }
+
+          Write-Host "======================================"
+          Write-Host " Tailscale"
+          Write-Host "======================================"
+
+          & $ts status
+
+          $ip = (& $ts ip -4 2>$null | Out-String).Trim()
+
+          if ($ip) {
+            Write-Host "Tailscale IPv4: $ip"
+          }
+          else {
+            Write-Warning "Tailscale IPv4 was not detected."
+          }
+
+      - name: RDP Health Check
+        run: |
+          Write-Host "======================================"
+          Write-Host " RDP Health"
+          Write-Host "======================================"
+
+          $service = Get-Service `
+            -Name TermService `
+            -ErrorAction SilentlyContinue
+
+          if (-not $service) {
+            throw "TermService does not exist."
+          }
+
+          if ($service.Status -ne "Running") {
+            Start-Service TermService
+            Start-Sleep -Seconds 3
+          }
+
+          $listener = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+
+          if ($listener) {
+            Write-Host "RDP listener: ONLINE"
+          }
+          else {
+            Write-Warning "RDP listener not detected."
+          }
+
+      - name: Session Watchdog
+        run: |
+          & "$PWD\scripts\fabric-engine.ps1" -Phase Watchdog
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Watchdog returned $LASTEXITCODE."
+          }
+
+      - name: Teardown
         if: always()
         run: |
-          & ./scripts/fabric-engine.ps1 -Phase Teardown
+          $ErrorActionPreference = "Continue"
+
+          if (Test-Path ".\scripts\fabric-engine.ps1") {
+            & "$PWD\scripts\fabric-engine.ps1" -Phase Teardown
+          }
+
+      - name: Final Status
+        if: always()
+        run: |
+          Write-Host "======================================"
+          Write-Host " Fabric Node Finished"
+          Write-Host "======================================"
+          Write-Host "Node: $env:MATRIX_ID"
+          Write-Host "Run:  $env:RUN_ID"
+```
