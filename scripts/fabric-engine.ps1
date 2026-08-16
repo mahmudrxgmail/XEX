@@ -4,18 +4,17 @@ param(
     [string]$Phase
 )
 
-$ErrorActionPreference = 'Continue'
 $FABRIC_ROOT = "C:\ProgramData\RDPFabric"
 
-# ═══════════════════════════════════════════════════════════════════════
-# PHASE 1: SYSTEM SETUP & IGNITION
-# ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# 🚀 PHASE 1: SETUP, TUNING, AND WORKSTATION INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════
 if ($Phase -eq "Setup") {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
-    Write-Host "INITIALIZING TAILSCALE FABRIC..." -ForegroundColor Cyan
+    Write-Host "⚡ INITIALIZING FULL TAILSCALE RDP FABRIC..." -ForegroundColor Cyan
 
-    # Runtime Calculation
+    # ── 1. Runtime & Deadline Calculations ──
     $runtime = [int]$env:RUNTIME_MINUTES
     if ($env:QUICK_TEST -eq "true") { $runtime = 5 }
     if ($runtime -gt 345) { $runtime = 345 }
@@ -24,9 +23,9 @@ if ($Phase -eq "Setup") {
     New-Item -ItemType Directory -Path $FABRIC_ROOT -Force | Out-Null
     $deadline = (Get-Date).AddMinutes($runtime)
     $deadline.ToString('o') | Set-Content -Path (Join-Path $FABRIC_ROOT 'deadline.txt') -Encoding ASCII -Force
-    Write-Host "Session budget: $runtime min (ends $($deadline.ToString('HH:mm:ss')))" -ForegroundColor Cyan
+    Write-Host "⏳ Session budget: $runtime min (ends $($deadline.ToString('HH:mm:ss')))" -ForegroundColor Cyan
 
-    # Parallel Tailscale Download
+    # ── 2. Parallel Background Tailscale Download ──
     $installer = "$env:TEMP\tailscale.msi"
     $dlJob = Start-Job -ScriptBlock {
         param($dst)
@@ -38,8 +37,9 @@ if ($Phase -eq "Setup") {
         }
         return 1
     } -ArgumentList $installer
+    Write-Host "📥 Tailscale MSI downloading in parallel..." -ForegroundColor DarkCyan
 
-    # Power & Performance
+    # ── 3. Power & Performance Scheme ──
     powercfg /change standby-timeout-ac 0
     powercfg /change monitor-timeout-ac 0
     powercfg /hibernate off
@@ -47,50 +47,110 @@ if ($Phase -eq "Setup") {
     $ultimate = (powercfg /list | Select-String "Ultimate Performance") -replace '.*GUID:\s*([a-f0-9-]+).*','$1'
     if ($ultimate) { powercfg -setactive $ultimate } else { powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c }
 
-    # Silverbullet Tool Hardening
+    # ── 4. Silverbullet Tool Hardening (High RAM/CPU Load Tuning) ──
+    # Windows Error Reporting (WER) Off
     $werKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting"
     if (-not (Test-Path $werKey)) { New-Item -Path $werKey -Force | Out-Null }
     Set-ItemProperty -Path $werKey -Name "Disabled" -Value 1 -Type DWord -Force
     Set-ItemProperty -Path $werKey -Name "DontShowUI" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $werKey -Name "LoggingDisabled" -Value 1 -Type DWord -Force
 
+    # Kill Fault Tolerant Heap (FTH)
     $fthKey = "HKLM:\SOFTWARE\Microsoft\FTH"
     if (-not (Test-Path $fthKey)) { New-Item -Path $fthKey -Force | Out-Null }
     Set-ItemProperty -Path $fthKey -Name "Enabled" -Value 0 -Type DWord -Force
+    & rundll32.exe fthk.dll,FthSysprepSpecialize 2>$null
 
+    # App Compat Engine & PCA Off
     $appCompat = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat"
     if (-not (Test-Path $appCompat)) { New-Item -Path $appCompat -Force | Out-Null }
     Set-ItemProperty -Path $appCompat -Name "DisablePCA" -Value 1 -Type DWord -Force
     Set-ItemProperty -Path $appCompat -Name "DisableEngine" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $appCompat -Name "DisableUACDetection" -Value 1 -Type DWord -Force
 
-    # Memory & Quotas
+    # Process Handle Ceiling (64M) & Desktop Quotas
     $winNTKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows"
     Set-ItemProperty -Path $winNTKey -Name "GDIProcessHandleQuota" -Value 65536 -Type DWord -Force
     Set-ItemProperty -Path $winNTKey -Name "USERProcessHandleQuota" -Value 65536 -Type DWord -Force
-    
+
+    # Heap Decommit Thresholds
     $sessionMgr = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
     Set-ItemProperty -Path $sessionMgr -Name "HeapDeCommitFreeBlockThreshold" -Value 262144 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $sessionMgr -Name "HeapDeCommitTotalFreeThreshold" -Value 65536 -Type DWord -Force -ErrorAction SilentlyContinue
 
-    # Network Stack & Offload
+    # NTFS File System Performance
+    fsutil behavior set disablelastaccess 1 | Out-Null
+    fsutil behavior set disable8dot3 1 | Out-Null
+
+    # ── 5. Microsoft Network Stack Optimization ──
+    # Force TLS 1.2 Client & Server
+    $tlsProtocols = @(
+        "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client",
+        "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server"
+    )
+    foreach ($path in $tlsProtocols) {
+        if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+        Set-ItemProperty -Path $path -Name "DisabledByDefault" -Value 0 -Type DWord -Force
+        Set-ItemProperty -Path $path -Name "Enabled" -Value 1 -Type DWord -Force
+    }
+
+    # Reset WinHTTP Direct Proxy
     netsh winhttp reset proxy | Out-Null
+
+    # DNS Cache Enlargement & Negative Cache Demolition
+    $dnsParam = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
+    if (-not (Test-Path $dnsParam)) { New-Item -Path $dnsParam -Force | Out-Null }
+    Set-ItemProperty -Path $dnsParam -Name "MaxCacheTtl" -Value 86400 -Type DWord -Force
+    Set-ItemProperty -Path $dnsParam -Name "MaxNegativeCacheTtl" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path $dnsParam -Name "CacheHashTableBucketSize" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $dnsParam -Name "CacheHashTableSize" -Value 384 -Type DWord -Force
+
+    # Modern TCP Offload & CUBIC Congestion
     Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ReceiveSegmentCoalescing Disabled -TaskOffload Enabled -ErrorAction SilentlyContinue
     netsh int tcp set global autotuninglevel=high | Out-Null
+    netsh int tcp set global ecncapability=disabled | Out-Null
+    netsh int tcp set global timestamps=disabled | Out-Null
+    try { Set-NetTCPSetting -SettingName InternetCustom -CongestionProvider CUBIC -ErrorAction SilentlyContinue } catch {}
+
+    # Dynamic Port Range Expansion (1025-65535) & 30s TIME_WAIT
+    $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+    Set-ItemProperty -Path $tcpParams -Name "MaxUserPort" -Value 65534 -Type DWord -Force
+    Set-ItemProperty -Path $tcpParams -Name "TcpTimedWaitDelay" -Value 30 -Type DWord -Force
+    Set-ItemProperty -Path $tcpParams -Name "EnablePMTUDiscovery" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tcpParams -Name "EnablePMTUBHDetect" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tcpParams -Name "DefaultTTL" -Value 64 -Type DWord -Force
     netsh int ipv4 set dynamicport tcp start=1025 num=64511 | Out-Null
     netsh int ipv4 set dynamicport udp start=1025 num=64511 | Out-Null
 
-    # Nagle Demolition
+    # NetBIOS Demolition across adapters
+    Get-WmiObject -Class Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true } | ForEach-Object {
+        $_.SetTcpipNetbios(2) | Out-Null
+    }
+
+    # IPv6 Transition Tech Demolition
+    netsh interface teredo set state disabled | Out-Null
+    netsh interface 6to4 set state disabled | Out-Null
+    netsh interface isatap set state disabled | Out-Null
+
+    # Disable NIC Power Management
+    Get-NetAdapter | ForEach-Object {
+        Disable-NetAdapterPowerManagement -Name $_.Name -ErrorAction SilentlyContinue
+    }
+
+    # Nagle Demolition (TCPNoDelay & TCPAckFrequency)
     $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
     foreach ($iface in $interfaces) {
         Set-ItemProperty -Path $iface.PSPath -Name "TcpAckFrequency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $iface.PSPath -Name "TCPNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
     }
 
-    # Bloat Services
+    # Stop & Disable Bloat Services
     foreach ($svc in 'WSearch','DiagTrack','DoSvc','Spooler','SysMain','PcaSvc','WerSvc') {
         Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
         Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
     }
 
-    # Terminal Services & Performance
+    # ── 6. RDP Graphics & High FPS Pipeline ──
     $TimerCode = 'using System; using System.Runtime.InteropServices; public class TimerRes { [DllImport("ntdll.dll", SetLastError = true)] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution); }'
     Add-Type -TypeDefinition $TimerCode -ErrorAction SilentlyContinue
     [TimerRes]::NtSetTimerResolution(5000, $true, [ref]0) | Out-Null
@@ -99,27 +159,101 @@ if ($Phase -eq "Setup") {
     if (-not (Test-Path $tsPolicies)) { New-Item -Path $tsPolicies -Force | Out-Null }
     Set-ItemProperty -Path $tsPolicies -Name "fEnableH264" -Value 1 -Type DWord -Force
     Set-ItemProperty -Path $tsPolicies -Name "fEnableH264444" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tsPolicies -Name "RemoteDesktopProfile" -Value 1 -Type DWord -Force
     Set-ItemProperty -Path $tsPolicies -Name "fNoRemoteDesktopWallpaper" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tsPolicies -Name "fClientDisableUDP" -Value 0 -Type DWord -Force
     Set-ItemProperty -Path $tsPolicies -Name "MaxIdleTime" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path $tsPolicies -Name "MaxDisconnectionTime" -Value 0 -Type DWord -Force
     Set-ItemProperty -Path $tsPolicies -Name "KeepAliveEnable" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tsPolicies -Name "KeepAliveInterval" -Value 1 -Type DWord -Force
 
-    # DWM 60fps
+    # Disable Unused RDP Channels
+    Set-ItemProperty -Path $tsPolicies -Name "fDisableCpm" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tsPolicies -Name "fDisableCdm" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tsPolicies -Name "fDisableLPT" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $tsPolicies -Name "fDisableAudioCapture" -Value 1 -Type DWord -Force
+
+    # DWM 60fps Rendering & System Responsiveness
     $dwm = "HKLM:\SOFTWARE\Microsoft\Windows\Dwm"
     Set-ItemProperty -Path $dwm -Name "DWMFRAMEINTERVAL" -Value 15 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $dwm -Name "OverlayTestMode" -Value 5 -Type DWord -Force -ErrorAction SilentlyContinue
+    $mmProfile = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+    Set-ItemProperty -Path $mmProfile -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Type DWord -Force
+    Set-ItemProperty -Path $mmProfile -Name "SystemResponsiveness" -Value 0 -Type DWord -Force
 
-    # User Account Setup
+    # ── 7. Workstation Mode (UAC / SmartScreen / MOTW / Defender Neutralization) ──
+    # Total UAC Demolition
+    $uacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    Set-ItemProperty -Path $uacPath -Name "EnableLUA" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path $uacPath -Name "ConsentPromptBehaviorAdmin" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path $uacPath -Name "PromptOnSecureDesktop" -Value 0 -Type DWord -Force
+
+    # SmartScreen Demolition
+    $smartScreenPolicies = @(
+        "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer"
+    )
+    foreach ($p in $smartScreenPolicies) {
+        if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+    }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "SmartScreenEnabled" -Value "Off" -Type String -Force
+
+    # Mark-of-the-Web (MOTW) Bypass
+    $attachPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Attachments"
+    if (-not (Test-Path $attachPath)) { New-Item -Path $attachPath -Force | Out-Null }
+    Set-ItemProperty -Path $attachPath -Name "SaveZoneInformation" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $attachPath -Name "HideZoneInfoOnProperties" -Value 1 -Type DWord -Force
+    
+    $attachLMPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments"
+    if (-not (Test-Path $attachLMPath)) { New-Item -Path $attachLMPath -Force | Out-Null }
+    Set-ItemProperty -Path $attachLMPath -Name "ScanWithAntiVirus" -Value 1 -Type DWord -Force
+
+    # Lock Down Defender
+    Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
+    $defFeatures = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
+    if (-not (Test-Path $defFeatures)) { New-Item -Path $defFeatures -Force | Out-Null }
+    Set-ItemProperty -Path $defFeatures -Name "TamperProtection" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    $defKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
+    if (-not (Test-Path $defKey)) { New-Item -Path $defKey -Force | Out-Null }
+    Set-ItemProperty -Path $defKey -Name "DisableAntiSpyware" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+    Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -ErrorAction SilentlyContinue
+
+    # ── 8. User Provisioning ──
     if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
     $secPass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
-    New-LocalUser -Name $env:RDP_USER -Password $secPass -Description "Fabric User" -AccountNeverExpires -ErrorAction SilentlyContinue | Out-Null
+    New-LocalUser -Name $env:RDP_USER -Password $secPass -Description "Fabric Admin User" -AccountNeverExpires -ErrorAction SilentlyContinue | Out-Null
     Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER -ErrorAction SilentlyContinue
     Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER -ErrorAction SilentlyContinue
 
-    # Enable RDP Listener
+    # Enable RDP & Direct Firewalls
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
     Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName "Tailscale-In-UDP" -Direction Inbound -Protocol UDP -LocalPort 41641 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    New-NetFirewallRule -DisplayName "MS-Cloud-Diagnostics" -Direction Outbound -Protocol TCP -RemotePort 80,443,8080 -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
-    # Install Tailscale
+    # Per-User GUI Responsiveness Tweaks at Logon
+    $hkcuTweaks = @'
+    $ErrorActionPreference = 'SilentlyContinue'
+    Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'MenuShowDelay' -Value '0'
+    Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'DragFullWindows' -Value '0'
+    Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'Wallpaper' -Value ''
+    Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarAnimations' -Value 0 -Type DWord
+    Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Value 2 -Type DWord
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' -Value 2 -Type DWord
+'@
+    $hkcuPath = Join-Path $FABRIC_ROOT "UserTweaks.ps1"
+    Set-Content -Path $hkcuPath -Value $hkcuTweaks -Encoding UTF8
+    $taskUser = "$env:COMPUTERNAME\$env:RDP_USER"
+    $tweakAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$hkcuPath`""
+    $tweakTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+    $tweakTrigger.Delay = "PT3S"
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
+    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskName "RDPFabric-UserTweaks" -Action $tweakAction -Trigger $tweakTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+
+    # ── 9. Install Tailscale & Join Mesh ──
     $dlJob | Wait-Job -Timeout 120 | Out-Null
     Receive-Job $dlJob | Out-Null
     Remove-Job $dlJob -Force
@@ -127,6 +261,8 @@ if ($Phase -eq "Setup") {
     if (Test-Path $installer) { Remove-Item -Path $installer -Force -ErrorAction SilentlyContinue }
 
     $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
+    if (-not (Test-Path $tsPath)) { Write-Error "Tailscale installation failed."; exit 1 }
+
     $hostname = "fabric-node-${env:RUN_ID}-${env:MATRIX_ID}"
     & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$hostname" --accept-routes=false --unattended
 
@@ -138,23 +274,101 @@ if ($Phase -eq "Setup") {
     }
     if (-not $ip) { Write-Error "Failed to acquire Tailscale IP."; exit 1 }
 
-    # Floating Overlay Setup
+    $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" -or $_.Name -match "Tailscale" } | Select-Object -First 1
+    if ($tsAdapter) { netsh interface ipv4 set subinterface "$($tsAdapter.Name)" mtu=1280 store=persistent | Out-Null }
+    $tsStatus = (& $tsPath status 2>$null | Out-String)
+    $isDirect = ($tsStatus -notmatch 'relay')
+
+    # ── 10. Dynamic Chrome Automation ──
+    $startupUrl = "https://fabric-x-xi.vercel.app/"
+    $extensionsRoot = Join-Path $FABRIC_ROOT "Extensions"
+    $bootstrapPath = Join-Path $FABRIC_ROOT "ChromeBootstrap.ps1"
+    New-Item -ItemType Directory -Path $extensionsRoot -Force | Out-Null
+
+    $bootstrapScript = @"
+    `$ErrorActionPreference = 'Continue'
+    `$extRoot = '$extensionsRoot'
+    `$extDirs = @()
+
+    if (Test-Path `$extRoot) {
+        Get-ChildItem -Path `$extRoot -Directory | ForEach-Object {
+            if (Test-Path (Join-Path `$_.FullName "manifest.json")) {
+                `$extDirs += `$_.FullName
+            }
+        }
+    }
+
+    `$loadArg = ""
+    if (`$extDirs.Count -gt 0) {
+        `$loadArg = "--load-extension=" + (`$extDirs -join ',')
+    }
+
+    `$chromePath = "`${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+    if (-not (Test-Path `$chromePath)) { `$chromePath = "`${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe" }
+
+    `$shell = New-Object -ComObject WScript.Shell
+    `$shortcut = `$shell.CreateShortcut("`$env:USERPROFILE\Desktop\Chrome - Fabric.lnk")
+    `$shortcut.TargetPath = `$chromePath
+    `$shortcut.WorkingDirectory = Split-Path `$chromePath
+    `$shortcut.IconLocation = "`$chromePath,0"
+    `$shortcut.Description = "Launch Chrome with Fabric Custom Extensions"
+
+    `$launchArgs = "--new-window $startupUrl `$loadArg"
+    `$shortcut.Arguments = `$launchArgs
+    `$shortcut.Save()
+
+    Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
+"@
+    Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8
+    $chromeAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bootstrapPath`""
+    $chromeTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+    $chromeTrigger.Delay = "PT10S"
+    Register-ScheduledTask -TaskName "RDPFabric-ChromeBootstrap" -Action $chromeAction -Trigger $chromeTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+
+    # Chrome Policies & Managed Bookmarks
+    $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
+    New-Item -Path $chromePolicyPath -Force | Out-Null
+    $bookmarkObjects = @(@{ toplevel_name = "RDP Fabric" }, @{ name = "Fabric App"; url = $startupUrl })
+    $bookmarkJson = $bookmarkObjects | ConvertTo-Json -Depth 10 -Compress
+    New-ItemProperty -Path $chromePolicyPath -Name "ManagedBookmarks" -PropertyType String -Value $bookmarkJson -Force | Out-Null
+    New-ItemProperty -Path $chromePolicyPath -Name "BookmarkBarEnabled" -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty -Path $chromePolicyPath -Name "RestoreOnStartup" -PropertyType DWord -Value 4 -Force | Out-Null
+    $startupUrlsJson = "[`"$startupUrl`"]"
+    New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
+
+    # ACL Permissions
+    $acl = Get-Acl $FABRIC_ROOT
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $acl.AddAccessRule($rule)
+    Set-Acl -Path $FABRIC_ROOT -AclObject $acl
+
+    # ── 11. Floating Desktop-Guarded Countdown Overlay ──
     $timerPath = Join-Path $FABRIC_ROOT "FabricTimer.ps1"
     $timerLauncher = Join-Path $FABRIC_ROOT "FabricTimer.vbs"
 
     $timerScript = @'
     $ErrorActionPreference = 'SilentlyContinue'
     while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1 }
+
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
+
+    $script:mutex = New-Object System.Threading.Mutex($false, 'Local\RDPFabricTimerOverlay')
+    if (-not $script:mutex.WaitOne(0)) { return }
 
     $script:deadlineFile = 'C:\ProgramData\RDPFabric\deadline.txt'
     $script:deadline = (Get-Date).AddMinutes(345)
     if (Test-Path $script:deadlineFile) {
-        try { $script:deadline = [datetime]::Parse((Get-Content -Path $script:deadlineFile -Raw).Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind) } catch {}
+        $raw = (Get-Content -Path $script:deadlineFile -Raw)
+        if ($raw) {
+            try {
+                $script:deadline = [datetime]::Parse($raw.Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+            } catch {}
+        }
     }
 
     $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'Fabric Timer'
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $form.Location = New-Object System.Drawing.Point(10, 10)
@@ -172,17 +386,43 @@ if ($Phase -eq "Setup") {
     $label.Text = '--:--:--'
     $form.Controls.Add($label)
 
+    $form.Add_Paint({
+        param($s, $e)
+        $pen = New-Object System.Drawing.Pen -ArgumentList ([System.Drawing.Color]::FromArgb(70, 70, 78)), 1
+        $e.Graphics.DrawRectangle($pen, 0, 0, $s.ClientSize.Width - 1, $s.ClientSize.Height - 1)
+        $pen.Dispose()
+    })
+
+    $script:dragging = $false
+    $script:dragOrigin = New-Object System.Drawing.Point(0, 0)
+    $onDown = { param($s, $e); if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $script:dragging = $true; $script:dragOrigin = $e.Location } }
+    $onMove = { param($s, $e); if ($script:dragging) { $form.Location = New-Object System.Drawing.Point(($form.Location.X + $e.X - $script:dragOrigin.X), ($form.Location.Y + $e.Y - $script:dragOrigin.Y)) } }
+    $onUp = { $script:dragging = $false }
+    $label.Add_MouseDown($onDown); $label.Add_MouseMove($onMove); $label.Add_MouseUp($onUp)
+    $form.Add_MouseDown($onDown);  $form.Add_MouseMove($onMove);  $form.Add_MouseUp($onUp)
+    $label.Add_DoubleClick({ $form.Location = New-Object System.Drawing.Point(10, 10) })
+
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 1000
     $timer.Add_Tick({
-        $total = [math]::Floor(($script:deadline - (Get-Date)).TotalSeconds)
+        $remaining = $script:deadline - (Get-Date)
+        $total = [math]::Floor($remaining.TotalSeconds)
         if ($total -le 0) { $label.Text = '00:00:00'; $label.ForeColor = [System.Drawing.Color]::FromArgb(255, 80, 80); return }
-        $label.Text = ('{0:00}:{1:00}:{2:00}' -f [math]::Floor($total / 3600), [math]::Floor(($total % 3600) / 60), ($total % 60))
+        $h = [math]::Floor($total / 3600); $m = [math]::Floor(($total % 3600) / 60); $s = $total % 60
+        $label.Text = ('{0:00}:{1:00}:{2:00}' -f $h, $m, $s)
         if ($total -le 300) { $label.ForeColor = [System.Drawing.Color]::FromArgb(255, 80, 80) }
         elseif ($total -le 900) { $label.ForeColor = [System.Drawing.Color]::FromArgb(255, 176, 32) }
+        else { $label.ForeColor = [System.Drawing.Color]::FromArgb(0, 230, 140) }
         if (-not $form.TopMost) { $form.TopMost = $true }
     })
     $timer.Start()
+
+    $keepTop = New-Object System.Windows.Forms.Timer
+    $keepTop.Interval = 30000
+    $keepTop.Add_Tick({ $form.TopMost = $false; $form.TopMost = $true })
+    $keepTop.Start()
+
+    [System.Windows.Forms.Application]::EnableVisualStyles()
     [System.Windows.Forms.Application]::Run($form)
 '@
     Set-Content -Path $timerPath -Value $timerScript -Encoding UTF8
@@ -190,71 +430,125 @@ if ($Phase -eq "Setup") {
     $vbs = "Set sh = CreateObject(`"WScript.Shell`")`nsh.Run `"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`"$timerPath`"`"`, 0, False"
     Set-Content -Path $timerLauncher -Value $vbs -Encoding ASCII
 
-    $taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$timerLauncher`""
-    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:COMPUTERNAME\$env:RDP_USER"
-    $taskPrincipal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\$env:RDP_USER" -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName "RDPFabric-Timer" -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Force | Out-Null
+    $timerAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$timerLauncher`""
+    $timerTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+    $timerTrigger.Delay = "PT5S"
+    $timerSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName "RDPFabric-Timer" -Action $timerAction -Trigger $timerTrigger -Principal $taskPrincipal -Settings $timerSettings -Force | Out-Null
 
-    # Telegram Notification
+    $startupDir = "C:\Users\$env:RDP_USER\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+    if (Test-Path $startupDir) { Copy-Item -Path $timerLauncher -Destination (Join-Path $startupDir "FabricTimer.vbs") -Force -ErrorAction SilentlyContinue }
+
+    # ── 12. Dispatch Telemetry ──
     if ($env:TG_TOKEN -and $env:TG_CHAT) {
-        $msg = "Fabric Node Online`n`nHost: $hostname`nIP: $ip`nUser: $env:RDP_USER`nDuration: $runtime min"
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage" -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg} -ErrorAction SilentlyContinue | Out-Null
+        $link = if ($isDirect) { "direct" } else { "relay" }
+        $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$hostname</code>`n🌐 <b>IP:</b> <code>$ip</code>`n🔗 <b>Path:</b> <code>$link</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$runtime</code> min`n⏱ <b>Overlay:</b> active"
+        $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
+        Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
+    } else {
+        Write-Host "=========================================="
+        Write-Host " CONNECT VIA RDP"
+        Write-Host " IP:   $ip"
+        Write-Host " USER: $env:RDP_USER"
+        Write-Host "=========================================="
     }
-    Write-Host "Fabric Node Online: IP = $ip" -ForegroundColor Green
+    Write-Host "✅ OS Layer Optimized. Full Flagship Ignition Complete." -ForegroundColor Green
 }
 
-# ═══════════════════════════════════════════════════════════════════════
-# PHASE 2: WATCHDOG & HANDOFF
-# ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# 🛡️ PHASE 2: WATCHDOG, HEARTBEAT, AND RECURSIVE DISPATCH
+# ═══════════════════════════════════════════════════════════════════════════
 if ($Phase -eq "Watchdog") {
     $runtime = [int]$env:RUNTIME_MINUTES
     if ($env:QUICK_TEST -eq "true") { $runtime = 5 }
     $start = Get-Date
+    $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
 
-    Write-Host "Holding session for $runtime minutes..." -ForegroundColor Cyan
+    Write-Host "🛡️ Holding session for $runtime minutes with 60s heartbeats..." -ForegroundColor Cyan
 
     while ((New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes -lt $runtime) {
         Start-Sleep -Seconds 60
         $remaining = [math]::Max(0, [math]::Round($runtime - (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes, 1))
 
-        # Check Tailscale
+        # Multi-Layer Watchdog: Service + Named Pipe
+        $tsOk = $false
         $svc = Get-Service -Name "IPNService" -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -ne 'Running') {
+            Write-Host "⚠️ Tailscale IPNService stopped — restarting..." -ForegroundColor Yellow
             Start-Service -Name "IPNService" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
         }
 
-        # Check RDP
+        if (Test-Path $tsPath) {
+            $backend = (& $tsPath status --json 2>$null | ConvertFrom-Json).BackendState
+            $tsOk = ($backend -eq 'Running')
+            if (-not $tsOk) {
+                Write-Host "⚠️ Tailscale backend '$backend' — re-upping..." -ForegroundColor Yellow
+                $hostname = "fabric-node-${env:RUN_ID}-${env:MATRIX_ID}"
+                & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$hostname" --accept-routes=false --unattended 2>$null | Out-Null
+            }
+        }
+
+        # Watchdog: Port 3389 Listener
         $rdpOk = [bool](Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue)
         if (-not $rdpOk) {
+            Write-Host "⚠️ RDP listener down — restarting TermService..." -ForegroundColor Yellow
             Restart-Service TermService -Force -ErrorAction SilentlyContinue
         }
 
-        Write-Host "Heartbeat: Active | $remaining min left"
+        Write-Host "Heartbeat: Active | TS:$($tsOk ? 'ok' : 'recovering') RDP:$($rdpOk ? 'ok' : 'recovering') | $remaining min left"
     }
 
-    # Workflow Cycle Handoff
+    # Recursive Cycle Dispatch Handoff with Retries
     $cycles = [int]$env:CYCLES
     if ($cycles -gt 0) {
         $next = $cycles - 1
-        Write-Host "Initiating Cycle Handoff ($next left)..." -ForegroundColor Yellow
-        gh workflow run "$env:WORKFLOW_REF" `
-            -f instance_count="1" `
-            -f runtime_minutes="$env:RUNTIME_MINUTES" `
-            -f quick_test="$env:QUICK_TEST" `
-            -f cycles="$next"
+        Write-Host "🔄 Initiating Cycle Handoff (Remaining: $next)..." -ForegroundColor Yellow
+        $dispatched = $false
+        for ($attempt = 1; $attempt -le 3 -and -not $dispatched; $attempt++) {
+            gh workflow run "$env:WORKFLOW_REF" `
+                -f instance_count="1" `
+                -f runtime_minutes="$env:RUNTIME_MINUTES" `
+                -f quick_test="$env:QUICK_TEST" `
+                -f cycles="$next"
+
+            if ($LASTEXITCODE -eq 0) {
+                $dispatched = $true
+                Write-Host "✅ Handoff successfully dispatched (attempt $attempt)!" -ForegroundColor Green
+            } else {
+                Write-Host "⚠️ Handoff attempt $attempt failed — retrying in 15s..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 15
+            }
+        }
+        if (-not $dispatched) { Write-Error "❌ Handoff failed after 3 attempts." }
+    } else {
+        Write-Host "🛑 No cycles remaining. Shutting down gracefully."
     }
 }
 
-# ═══════════════════════════════════════════════════════════════════════
-# PHASE 3: TEARDOWN
-# ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# 🧹 PHASE 3: TEARDOWN
+# ═══════════════════════════════════════════════════════════════════════════
 if ($Phase -eq "Teardown") {
-    Write-Host "Executing teardown..."
+    $ErrorActionPreference = 'SilentlyContinue'
+    Write-Host "🧹 Executing ephemeral teardown..."
+
     $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
-    if (Test-Path $tsPath) { & $tsPath logout 2>$null | Out-Null }
-    Unregister-ScheduledTask -TaskName "RDPFabric-Timer" -Confirm:$false -ErrorAction SilentlyContinue
+    if (Test-Path $tsPath) {
+        Write-Host "Logging out of Tailnet..."
+        & $tsPath logout 2>$null | Out-Null
+    }
+
+    foreach ($t in 'RDPFabric-Timer','RDPFabric-ChromeBootstrap','RDPFabric-UserTweaks') {
+        Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
+    }
     Get-Process -Name 'chrome','powershell','wscript' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    if (Test-Path $FABRIC_ROOT) { Remove-Item -Path $FABRIC_ROOT -Recurse -Force -ErrorAction SilentlyContinue }
-    Write-Host "Teardown complete."
+
+    Write-Host "Waiting 3 seconds for Windows kernel file-lock release..."
+    Start-Sleep -Seconds 3
+
+    if (Test-Path $FABRIC_ROOT) {
+        Remove-Item -Path $FABRIC_ROOT -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "✅ Teardown complete."
 }
