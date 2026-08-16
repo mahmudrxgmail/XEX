@@ -13,24 +13,53 @@ $ProgressPreference = "SilentlyContinue"
 
 $FabricRoot = "C:\ProgramData\RDPFabric"
 $DeadlineFile = Join-Path $FabricRoot "deadline.txt"
-$TailscalePath = "C:\Program Files\Tailscale\tailscale.exe"
+$NodeInfoFile = Join-Path $FabricRoot "node-info.txt"
+
+$TailscalePath =
+    "C:\Program Files\Tailscale\tailscale.exe"
+
+# ==============================================================
+# HELPERS
+# ==============================================================
 
 function Write-FabricLog {
     param(
+        [Parameter(Mandatory = $true)]
         [string]$Message,
+
         [ConsoleColor]$Color = [ConsoleColor]::Gray
     )
 
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Message" -ForegroundColor $Color
+    Write-Host `
+        "[$(Get-Date -Format 'HH:mm:ss')] $Message" `
+        -ForegroundColor $Color
 }
 
-function Get-RuntimeMinutes {
+function Test-Admin {
+    $identity =
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+
+    $principal =
+        New-Object Security.Principal.WindowsPrincipal($identity)
+
+    return $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+function Get-SessionRuntime {
     $runtime = 60
 
-    if ($env:RUNTIME_MINUTES) {
+    if (-not [string]::IsNullOrWhiteSpace(
+        $env:RUNTIME_MINUTES
+    )) {
+
         $parsed = 0
 
-        if ([int]::TryParse($env:RUNTIME_MINUTES, [ref]$parsed)) {
+        if ([int]::TryParse(
+            $env:RUNTIME_MINUTES,
+            [ref]$parsed
+        )) {
             $runtime = $parsed
         }
     }
@@ -50,61 +79,92 @@ function Get-RuntimeMinutes {
     return $runtime
 }
 
-function Test-Administrator {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-
-    return $principal.IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator
-    )
+function Ensure-FabricDirectory {
+    if (-not (Test-Path $FabricRoot)) {
+        New-Item `
+            -Path $FabricRoot `
+            -ItemType Directory `
+            -Force |
+            Out-Null
+    }
 }
 
+# ==============================================================
+# POWER
+# ==============================================================
+
 function Configure-Power {
-    Write-FabricLog "Configuring power settings..." Cyan
+    Write-FabricLog `
+        "Configuring power management..." `
+        Cyan
 
-    powercfg /change standby-timeout-ac 0 | Out-Null
-    powercfg /change monitor-timeout-ac 0 | Out-Null
+    powercfg /change standby-timeout-ac 0 |
+        Out-Null
 
-    # Prefer Ultimate Performance when available.
-    $ultimateGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
+    powercfg /change monitor-timeout-ac 0 |
+        Out-Null
 
+    powercfg /hibernate off |
+        Out-Null
+
+    # Prefer Ultimate Performance where Windows provides it.
     try {
-        powercfg -duplicatescheme $ultimateGuid 2>$null | Out-Null
+        powercfg `
+            -duplicatescheme `
+            "e9a42b02-d5df-448d-aa00-03f14749eb61" `
+            2>$null |
+            Out-Null
     }
     catch {
-        # Scheme may already exist.
     }
 
     $schemes = powercfg /list 2>$null
 
-    $match = $schemes |
+    $match =
+        $schemes |
         Select-String "Ultimate Performance" |
         Select-Object -First 1
 
     if ($match) {
-        $guid = [regex]::Match(
-            $match.ToString(),
-            "[a-fA-F0-9-]{36}"
-        ).Value
+
+        $guid =
+            [regex]::Match(
+                $match.ToString(),
+                "[a-fA-F0-9-]{36}"
+            ).Value
 
         if ($guid) {
-            powercfg -setactive $guid | Out-Null
-            Write-FabricLog "Ultimate Performance enabled." Green
+            powercfg -setactive $guid |
+                Out-Null
+
+            Write-FabricLog `
+                "Ultimate Performance selected." `
+                Green
+
             return
         }
     }
 
-    Write-FabricLog "Using current Windows power scheme." Yellow
+    Write-FabricLog `
+        "Ultimate Performance unavailable; keeping current scheme." `
+        Yellow
 }
 
+# ==============================================================
+# NETWORK
+# ==============================================================
+
 function Configure-Network {
-    Write-FabricLog "Applying conservative network optimizations..." Cyan
+    Write-FabricLog `
+        "Configuring supported network settings..." `
+        Cyan
 
-    # Keep Windows TCP autotuning enabled.
+    # Keep Windows autotuning at its supported normal level.
     netsh interface tcp set global `
-        autotuninglevel=normal | Out-Null
+        autotuninglevel=normal |
+        Out-Null
 
-    # RSS improves network processing on supported adapters.
+    # RSS can improve packet processing on supported adapters.
     try {
         Set-NetOffloadGlobalSetting `
             -ReceiveSideScaling Enabled `
@@ -113,16 +173,23 @@ function Configure-Network {
     catch {
     }
 
-    # Do not force undocumented registry/network values.
-    # Windows will retain its supported defaults.
+    # Refresh local DNS cache.
+    Clear-DnsClientCache `
+        -ErrorAction SilentlyContinue
 
-    Clear-DnsClientCache -ErrorAction SilentlyContinue
-
-    Write-FabricLog "Network configuration completed." Green
+    Write-FabricLog `
+        "Network configuration complete." `
+        Green
 }
 
+# ==============================================================
+# RDP
+# ==============================================================
+
 function Configure-RDP {
-    Write-FabricLog "Configuring RDP..." Cyan
+    Write-FabricLog `
+        "Configuring Remote Desktop..." `
+        Cyan
 
     $terminalServer =
         "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
@@ -131,17 +198,20 @@ function Configure-RDP {
         -Path $terminalServer `
         -Name "fDenyTSConnections" `
         -Value 0 `
-        -Type DWord
+        -Type DWord `
+        -Force
 
     $rdpTcp =
         "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
 
     if (Test-Path $rdpTcp) {
+
         Set-ItemProperty `
             -Path $rdpTcp `
             -Name "UserAuthentication" `
             -Value 1 `
-            -Type DWord
+            -Type DWord `
+            -Force
     }
 
     Enable-NetFirewallRule `
@@ -156,46 +226,60 @@ function Configure-RDP {
         -Name "TermService" `
         -ErrorAction SilentlyContinue
 
-    Write-FabricLog "RDP configured." Green
+    Write-FabricLog `
+        "RDP configuration complete." `
+        Green
 }
 
-function Configure-User {
-    Write-FabricLog "Configuring RDP user..." Cyan
+# ==============================================================
+# USER
+# ==============================================================
 
-    if (-not $env:RDP_PASS) {
+function Configure-RDPUser {
+    Write-FabricLog `
+        "Configuring RDP user..." `
+        Cyan
+
+    if ([string]::IsNullOrWhiteSpace($env:RDP_PASS)) {
         throw "RDP_PASSWORD secret is missing."
     }
 
-    $securePassword = ConvertTo-SecureString `
-        $env:RDP_PASS `
-        -AsPlainText `
-        -Force
+    $password =
+        ConvertTo-SecureString `
+            $env:RDP_PASS `
+            -AsPlainText `
+            -Force
 
-    $existing =
+    $user =
         Get-LocalUser `
             -Name $env:RDP_USER `
             -ErrorAction SilentlyContinue
 
-    if (-not $existing) {
+    if (-not $user) {
 
         New-LocalUser `
             -Name $env:RDP_USER `
-            -Password $securePassword `
+            -Password $password `
             -Description "RDP Fabric User" `
             -AccountNeverExpires `
             -PasswordNeverExpires `
-            -ErrorAction Stop | Out-Null
+            -ErrorAction Stop |
+            Out-Null
 
-        Write-FabricLog "Created user $env:RDP_USER." Green
+        Write-FabricLog `
+            "Created $env:RDP_USER." `
+            Green
     }
     else {
 
         Set-LocalUser `
             -Name $env:RDP_USER `
-            -Password $securePassword `
+            -Password $password `
             -ErrorAction SilentlyContinue
 
-        Write-FabricLog "Updated user password." Green
+        Write-FabricLog `
+            "Updated password for $env:RDP_USER." `
+            Green
     }
 
     Add-LocalGroupMember `
@@ -209,20 +293,35 @@ function Configure-User {
         -ErrorAction SilentlyContinue
 }
 
+# ==============================================================
+# TAILSCALE INSTALL
+# ==============================================================
+
 function Install-Tailscale {
-    Write-FabricLog "Installing Tailscale..." Cyan
+    Write-FabricLog `
+        "Checking Tailscale installation..." `
+        Cyan
 
     if (Test-Path $TailscalePath) {
-        Write-FabricLog "Tailscale already installed." Green
+
+        Write-FabricLog `
+            "Tailscale is already installed." `
+            Green
+
         return
     }
 
-    $installer = Join-Path $env:TEMP "tailscale-setup.msi"
+    $installer =
+        Join-Path `
+            $env:TEMP `
+            "tailscale-setup.msi"
 
     $url =
         "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
 
-    Write-FabricLog "Downloading Tailscale..."
+    Write-FabricLog `
+        "Downloading Tailscale..." `
+        Cyan
 
     Invoke-WebRequest `
         -Uri $url `
@@ -230,43 +329,63 @@ function Install-Tailscale {
         -UseBasicParsing
 
     if (-not (Test-Path $installer)) {
-        throw "Tailscale installer download failed."
+        throw "Tailscale installer was not downloaded."
     }
 
-    $size = (Get-Item $installer).Length
+    $size =
+        (Get-Item $installer).Length
 
     if ($size -lt 1MB) {
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        throw "Downloaded Tailscale installer appears invalid."
+
+        Remove-Item `
+            $installer `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+        throw "Tailscale installer appears invalid."
     }
 
-    Start-Process `
-        -FilePath "msiexec.exe" `
-        -ArgumentList @(
-            "/i",
-            "`"$installer`"",
-            "/quiet",
-            "/norestart"
-        ) `
-        -Wait `
-        -NoNewWindow
+    $process =
+        Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList @(
+                "/i",
+                "`"$installer`"",
+                "/quiet",
+                "/norestart"
+            ) `
+            -Wait `
+            -PassThru `
+            -NoNewWindow
 
     Remove-Item `
         $installer `
         -Force `
         -ErrorAction SilentlyContinue
 
-    if (-not (Test-Path $TailscalePath)) {
-        throw "Tailscale installation failed."
+    if ($process.ExitCode -notin @(0, 3010)) {
+        throw "Tailscale MSI failed with exit code $($process.ExitCode)."
     }
 
-    Write-FabricLog "Tailscale installed." Green
+    if (-not (Test-Path $TailscalePath)) {
+        throw "Tailscale executable was not found after installation."
+    }
+
+    Write-FabricLog `
+        "Tailscale installation complete." `
+        Green
 }
 
-function Connect-Tailscale {
-    Write-FabricLog "Connecting to Tailscale..." Cyan
+# ==============================================================
+# TAILSCALE CONNECTION
+# ==============================================================
 
-    if (-not $env:TS_AUTHKEY) {
+function Connect-Tailscale {
+    Write-FabricLog `
+        "Connecting to Tailscale..." `
+        Cyan
+
+    if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
         throw "TAILSCALE_AUTH_KEY secret is missing."
     }
 
@@ -285,7 +404,7 @@ function Connect-Tailscale {
 
     $ip = $null
 
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($attempt = 1; $attempt -le 30; $attempt++) {
 
         Start-Sleep -Seconds 1
 
@@ -298,48 +417,33 @@ function Connect-Tailscale {
         }
     }
 
-    if (-not $ip) {
-        throw "Could not obtain Tailscale IPv4 address."
+    if ([string]::IsNullOrWhiteSpace($ip)) {
+        throw "Tailscale IPv4 address was not obtained."
     }
 
-    Write-FabricLog "Tailscale IPv4: $ip" Green
+    Write-FabricLog `
+        "Tailscale IPv4: $ip" `
+        Green
 
-    $status =
-        (& $TailscalePath status 2>$null |
-        Out-String).Trim()
+    Write-Host ""
+    Write-Host "--- Tailscale Status ---"
 
-    if ($status) {
-        Write-Host ""
-        Write-Host $status
-        Write-Host ""
-    }
+    & $TailscalePath status
 
     return $ip
 }
 
-function Configure-LocalFirewall {
-    Write-FabricLog "Configuring local firewall..." Cyan
+# ==============================================================
+# FILES
+# ==============================================================
 
-    Enable-NetFirewallRule `
-        -DisplayGroup "Remote Desktop" `
-        -ErrorAction SilentlyContinue
-
-    # Tailscale normally handles its own connectivity.
-    # No broad inbound Internet rule is created here.
-
-    Write-FabricLog "Firewall configuration completed." Green
-}
-
-function Create-SessionFiles {
+function Create-SessionInfo {
     param(
+        [Parameter(Mandatory = $true)]
         [datetime]$Deadline
     )
 
-    New-Item `
-        -ItemType Directory `
-        -Path $FabricRoot `
-        -Force |
-        Out-Null
+    Ensure-FabricDirectory
 
     $Deadline.ToString("o") |
         Set-Content `
@@ -349,24 +453,43 @@ function Create-SessionFiles {
 
     $info = @"
 RDP Fabric
-==========
+==============================
 
-Node: $env:MATRIX_ID
-Run ID: $env:RUN_ID
-User: $env:RDP_USER
-Deadline: $($Deadline.ToString("o"))
+Node ID:
+$env:MATRIX_ID
 
-Tailscale is used as the private network transport.
+GitHub Run:
+$env:RUN_ID
+
+RDP User:
+$env:RDP_USER
+
+Runtime:
+$(Get-SessionRuntime) minutes
+
+Deadline:
+$($Deadline.ToString("o"))
+
+Transport:
+Tailscale
+
+Created:
+$(Get-Date -Format "o")
 "@
 
     $info |
         Set-Content `
-            -Path (Join-Path $FabricRoot "node-info.txt") `
+            -Path $NodeInfoFile `
             -Encoding UTF8 `
             -Force
 }
 
-function Get-TailscaleHealth {
+# ==============================================================
+# HEALTH
+# ==============================================================
+
+function Test-TailscaleHealth {
+
     if (-not (Test-Path $TailscalePath)) {
         return $false
     }
@@ -376,21 +499,24 @@ function Get-TailscaleHealth {
         $json =
             & $TailscalePath status --json 2>$null
 
-        if (-not $json) {
+        if ([string]::IsNullOrWhiteSpace($json)) {
             return $false
         }
 
         $status =
             $json | ConvertFrom-Json
 
-        return ($status.BackendState -eq "Running")
+        return (
+            $status.BackendState -eq "Running"
+        )
     }
     catch {
         return $false
     }
 }
 
-function Get-RdpHealth {
+function Test-RDPHealth {
+
     try {
 
         $service =
@@ -419,21 +545,46 @@ function Get-RdpHealth {
     }
 }
 
-function Start-Watchdog {
-    $runtime = Get-RuntimeMinutes
+function Test-InternetHealth {
 
-    $start = Get-Date
-    $deadline = $start.AddMinutes($runtime)
+    try {
+
+        $test =
+            Test-NetConnection `
+                -ComputerName "1.1.1.1" `
+                -Port 443 `
+                -WarningAction SilentlyContinue
+
+        return [bool]$test.TcpTestSucceeded
+    }
+    catch {
+        return $false
+    }
+}
+
+# ==============================================================
+# WATCHDOG
+# ==============================================================
+
+function Start-SessionWatchdog {
+
+    $runtime =
+        Get-SessionRuntime
+
+    $deadline =
+        (Get-Date).AddMinutes($runtime)
 
     if (Test-Path $DeadlineFile) {
 
         try {
+
             $saved =
                 Get-Content `
-                    $DeadlineFile `
+                    -Path $DeadlineFile `
                     -Raw
 
-            if ($saved) {
+            if (-not [string]::IsNullOrWhiteSpace($saved)) {
+
                 $deadline =
                     [datetime]::Parse(
                         $saved.Trim(),
@@ -443,14 +594,15 @@ function Start-Watchdog {
             }
         }
         catch {
+
             Write-FabricLog `
-                "Could not read saved deadline; using current runtime." `
+                "Could not read saved deadline." `
                 Yellow
         }
     }
 
     Write-FabricLog `
-        "Watchdog active until $($deadline.ToString('HH:mm:ss'))." `
+        "Watchdog running until $($deadline.ToString('HH:mm:ss'))." `
         Cyan
 
     while ($true) {
@@ -467,13 +619,17 @@ function Start-Watchdog {
                 $remaining.TotalSeconds / 60
             )
 
-        $tsOk = Get-TailscaleHealth
-        $rdpOk = Get-RdpHealth
+        # ------------------------------------------------------
+        # TAILSCALE
+        # ------------------------------------------------------
+
+        $tsOk =
+            Test-TailscaleHealth
 
         if (-not $tsOk) {
 
             Write-FabricLog `
-                "Tailscale health check failed; attempting recovery..." `
+                "Tailscale health check failed. Recovering..." `
                 Yellow
 
             try {
@@ -493,13 +649,21 @@ function Start-Watchdog {
             }
         }
 
+        # ------------------------------------------------------
+        # RDP
+        # ------------------------------------------------------
+
+        $rdpOk =
+            Test-RDPHealth
+
         if (-not $rdpOk) {
 
             Write-FabricLog `
-                "RDP health check failed; restarting TermService..." `
+                "RDP health check failed. Restarting TermService..." `
                 Yellow
 
             try {
+
                 Restart-Service `
                     -Name "TermService" `
                     -Force `
@@ -509,48 +673,35 @@ function Start-Watchdog {
             }
         }
 
+        # ------------------------------------------------------
+        # INTERNET
+        # ------------------------------------------------------
+
+        $internetOk =
+            Test-InternetHealth
+
+        # ------------------------------------------------------
+        # HEARTBEAT
+        # ------------------------------------------------------
+
         Write-FabricLog `
-            "Heartbeat | Tailscale=$tsOk | RDP=$rdpOk | $minutes min remaining" `
+            "Heartbeat | TS=$tsOk | RDP=$rdpOk | NET=$internetOk | $minutes min remaining" `
             Cyan
 
         Start-Sleep -Seconds 60
     }
 
     Write-FabricLog `
-        "Session duration reached. Watchdog stopping." `
+        "Session deadline reached." `
         Green
 }
 
-function Remove-FabricTasks {
-    $tasks = @(
-        "RDPFabric-UserTweaks",
-        "RDPFabric-ChromeBootstrap",
-        "RDPFabric-Timer"
-    )
-
-    foreach ($task in $tasks) {
-
-        Unregister-ScheduledTask `
-            -TaskName $task `
-            -Confirm:$false `
-            -ErrorAction SilentlyContinue
-    }
-}
-
-function Disconnect-Tailscale {
-    if (Test-Path $TailscalePath) {
-
-        Write-FabricLog `
-            "Disconnecting Tailscale..." `
-            Cyan
-
-        & $TailscalePath logout `
-            2>$null |
-            Out-Null
-    }
-}
+# ==============================================================
+# TEARDOWN
+# ==============================================================
 
 function Remove-FabricData {
+
     if (Test-Path $FabricRoot) {
 
         Remove-Item `
@@ -561,15 +712,33 @@ function Remove-FabricData {
     }
 }
 
+function Disconnect-Tailscale {
+
+    if (Test-Path $TailscalePath) {
+
+        Write-FabricLog `
+            "Logging out of Tailscale..." `
+            Cyan
+
+        & $TailscalePath logout `
+            2>$null |
+            Out-Null
+    }
+}
+
 # ==============================================================
 # MAIN
 # ==============================================================
 
-if (-not (Test-Administrator)) {
-    throw "fabric-engine.ps1 must run with Administrator privileges."
+if (-not (Test-Admin)) {
+    throw "This script requires Administrator privileges."
 }
 
 switch ($Phase) {
+
+    # ==========================================================
+    # SETUP
+    # ==========================================================
 
     "Setup" {
 
@@ -585,7 +754,8 @@ switch ($Phase) {
             "============================================" `
             Cyan
 
-        $runtime = Get-RuntimeMinutes
+        $runtime =
+            Get-SessionRuntime
 
         $deadline =
             (Get-Date).AddMinutes($runtime)
@@ -594,22 +764,20 @@ switch ($Phase) {
             "Runtime: $runtime minutes" `
             Cyan
 
-        Create-SessionFiles `
+        Create-SessionInfo `
             -Deadline $deadline
 
         Configure-Power
 
         Configure-Network
 
-        Configure-LocalFirewall
-
-        Configure-User
+        Configure-RDPUser
 
         Configure-RDP
 
         Install-Tailscale
 
-        $tailscaleIP =
+        $ip =
             Connect-Tailscale
 
         Write-FabricLog `
@@ -626,11 +794,15 @@ switch ($Phase) {
 
         Write-Host ""
         Write-Host "RDP USER : $env:RDP_USER"
-        Write-Host "TAILSCALE: $tailscaleIP"
+        Write-Host "TS IP    : $ip"
         Write-Host "RUNTIME  : $runtime minutes"
         Write-Host "DEADLINE : $($deadline.ToString('HH:mm:ss'))"
         Write-Host ""
     }
+
+    # ==========================================================
+    # WATCHDOG
+    # ==========================================================
 
     "Watchdog" {
 
@@ -638,8 +810,12 @@ switch ($Phase) {
             "Starting session watchdog..." `
             Cyan
 
-        Start-Watchdog
+        Start-SessionWatchdog
     }
+
+    # ==========================================================
+    # TEARDOWN
+    # ==========================================================
 
     "Teardown" {
 
@@ -657,14 +833,12 @@ switch ($Phase) {
             "============================================" `
             Yellow
 
-        Remove-FabricTasks
-
         Disconnect-Tailscale
 
         Remove-FabricData
 
         Write-FabricLog `
-            "Teardown completed." `
+            "Teardown complete." `
             Green
     }
 }
