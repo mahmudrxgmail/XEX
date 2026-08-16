@@ -37,12 +37,13 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - id: set-matrix
-        name: Generate Matrix
+        name: Generate Runner Matrix
         shell: bash
         run: |
           count=${{ inputs.instance_count }}
           matrix_json=$(seq 1 $count | jq -R . | jq -s -c '{id: .}')
           echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+          echo "Orchestrating $count runner(s)."
 
   fabric:
     needs: orchestrate
@@ -71,15 +72,15 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Execute Fabric Engine Setup
+      - name: Phase 1 & 2: Fabric Ignition & Optimization
         run: |
           & ./scripts/fabric-engine.ps1 -Phase Setup
 
-      - name: Hold Session & Health Watchdog
+      - name: Phase 3 & 4: Session Hold & Watchdog
         run: |
           & ./scripts/fabric-engine.ps1 -Phase Watchdog
 
-      - name: Ephemeral Teardown
+      - name: Phase 5: Ephemeral Teardown
         if: always()
         run: |
           & ./scripts/fabric-engine.ps1 -Phase Teardown
