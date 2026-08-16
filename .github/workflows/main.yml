@@ -55,7 +55,7 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - id: set-matrix
-        name: 🧮 Generate Runner Matrix
+        name: Generate Runner Matrix
         shell: bash
         run: |
           count=${{ inputs.instance_count }}
@@ -87,13 +87,13 @@ jobs:
 
     steps:
       # ── 1. OS INIT, SILVERBULLET HARDENING & NETWORK STACK ─────────────
-      - name: "⚡ Phase 1: Native Init, Silverbullet Hardening & MS Network Stack"
+      - name: "Phase 1: Native Init, Silverbullet Hardening & MS Network Stack"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          Write-Host "🚀 INITIALIZING TAILSCALE FABRIC (SILVERBULLET EDITION)..." -ForegroundColor Cyan
+          Write-Host "INITIALIZING TAILSCALE FABRIC (SILVERBULLET EDITION)..." -ForegroundColor Cyan
 
-          # ── Runtime & Deadline Calculations ──
+          # Runtime & Deadline Calculations
           $runtime = [int]"${{ inputs.runtime_minutes }}"
           if ("${{ inputs.quick_test }}" -eq "true") { $runtime = 5 }
           if ($runtime -gt 345) { $runtime = 345 }
@@ -104,9 +104,9 @@ jobs:
           $deadline = (Get-Date).AddMinutes($runtime)
           $deadline.ToString('o') | Set-Content -Path (Join-Path $env:FABRIC_ROOT 'deadline.txt') -Encoding ASCII -Force
           "SESSION_DEADLINE=$($deadline.ToString('o'))" | Out-File -Append $env:GITHUB_ENV
-          Write-Host "⏳ Session budget: $runtime min (ends $($deadline.ToString('HH:mm:ss')))" -ForegroundColor Cyan
+          Write-Host "Session budget: $runtime min (ends $($deadline.ToString('HH:mm:ss')))" -ForegroundColor Cyan
 
-          # ── Parallel Tailscale MSI Download ──
+          # Parallel Tailscale MSI Download
           $installer = "$env:TEMP\tailscale.msi"
           $dlJob = Start-Job -ScriptBlock {
               param($dst)
@@ -120,9 +120,8 @@ jobs:
           } -ArgumentList $installer
           "TS_DL_JOB=$($dlJob.Id)" | Out-File -Append $env:GITHUB_ENV
           "TS_MSI=$installer" | Out-File -Append $env:GITHUB_ENV
-          Write-Host "📥 Tailscale background download started (job $($dlJob.Id))..." -ForegroundColor DarkCyan
 
-          # ── Windows Power & Sleep Demolition ──
+          # Power & Performance Profiles
           powercfg /change standby-timeout-ac 0
           powercfg /change monitor-timeout-ac 0
           powercfg /hibernate off
@@ -130,43 +129,41 @@ jobs:
           $ultimate = (powercfg /list | Select-String "Ultimate Performance") -replace '.*GUID:\s*([a-f0-9-]+).*','$1'
           if ($ultimate) { powercfg -setactive $ultimate } else { powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c }
 
-          # ── Silverbullet Tool Hardening (High RAM/CPU Load Optimization) ──
-          # 1. Windows Error Reporting (WER) Off
+          # Windows Error Reporting (WER) Off
           $werKey = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting"
           if (-not (Test-Path $werKey)) { New-Item -Path $werKey -Force | Out-Null }
           Set-ItemProperty -Path $werKey -Name "Disabled" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $werKey -Name "DontShowUI" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $werKey -Name "LoggingDisabled" -Value 1 -Type DWord -Force
 
-          # 2. Kill Fault Tolerant Heap (FTH)
+          # Fault Tolerant Heap (FTH) Off
           $fthKey = "HKLM:\SOFTWARE\Microsoft\FTH"
           if (-not (Test-Path $fthKey)) { New-Item -Path $fthKey -Force | Out-Null }
           Set-ItemProperty -Path $fthKey -Name "Enabled" -Value 0 -Type DWord -Force
           & rundll32.exe fthk.dll,FthSysprepSpecialize 2>$null
 
-          # 3. Application Compatibility Engine & PCA Off
+          # Application Compatibility Engine & PCA Off
           $appCompat = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat"
           if (-not (Test-Path $appCompat)) { New-Item -Path $appCompat -Force | Out-Null }
           Set-ItemProperty -Path $appCompat -Name "DisablePCA" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $appCompat -Name "DisableEngine" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $appCompat -Name "DisableUACDetection" -Value 1 -Type DWord -Force
 
-          # 4. Process Handle Ceiling & GDI/USER Quotas (64M Ceiling / Max Desktop Quotas)
+          # Process Handle & GDI/USER Quotas
           $winNTKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows"
           Set-ItemProperty -Path $winNTKey -Name "GDIProcessHandleQuota" -Value 65536 -Type DWord -Force
           Set-ItemProperty -Path $winNTKey -Name "USERProcessHandleQuota" -Value 65536 -Type DWord -Force
           
-          # 5. Heap Decommit Thresholds & Memory Subsystem Optimization
+          # Heap Manager & Memory Subsystem
           $sessionMgr = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
           Set-ItemProperty -Path $sessionMgr -Name "HeapDeCommitFreeBlockThreshold" -Value 262144 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $sessionMgr -Name "HeapDeCommitTotalFreeThreshold" -Value 65536 -Type DWord -Force -ErrorAction SilentlyContinue
           
-          # 6. NTFS File System Performance
+          # NTFS Performance
           fsutil behavior set disablelastaccess 1 | Out-Null
           fsutil behavior set disable8dot3 1 | Out-Null
 
-          # ── Microsoft Network Compatibility & Latency Demolition ──
-          # 1. Force TLS 1.2 Client & Server
+          # Force TLS 1.2 Client & Server
           $tlsProtocols = @("HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client",
                             "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server")
           foreach ($path in $tlsProtocols) {
@@ -175,10 +172,10 @@ jobs:
               Set-ItemProperty -Path $path -Name "Enabled" -Value 1 -Type DWord -Force
           }
 
-          # 2. Reset WinHTTP Direct Connection (Clear Proxy PAC Dead-Ends)
+          # Reset WinHTTP Proxy to Direct
           netsh winhttp reset proxy | Out-Null
 
-          # 3. DNS Cache Enlargement & Negative Cache Demolition
+          # DNS Cache Enlargement & Zero Negative Cache
           $dnsParam = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
           if (-not (Test-Path $dnsParam)) { New-Item -Path $dnsParam -Force | Out-Null }
           Set-ItemProperty -Path $dnsParam -Name "MaxCacheTtl" -Value 86400 -Type DWord -Force
@@ -186,14 +183,14 @@ jobs:
           Set-ItemProperty -Path $dnsParam -Name "CacheHashTableBucketSize" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $dnsParam -Name "CacheHashTableSize" -Value 384 -Type DWord -Force
 
-          # 4. Modern NetOffload Settings & TCP Engine
+          # TCP Stack & Offload Tuning
           Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ReceiveSegmentCoalescing Disabled -TaskOffload Enabled -ErrorAction SilentlyContinue
           netsh int tcp set global autotuninglevel=high | Out-Null
           netsh int tcp set global ecncapability=disabled | Out-Null
           netsh int tcp set global timestamps=disabled | Out-Null
           try { Set-NetTCPSetting -SettingName InternetCustom -CongestionProvider CUBIC -ErrorAction SilentlyContinue } catch {}
 
-          # 5. Ephemeral Port Range Expansion (1025-65535) & TIME_WAIT Reduction (30s)
+          # Dynamic Port Expansion (1025-65535) & 30s TIME_WAIT
           $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
           Set-ItemProperty -Path $tcpParams -Name "MaxUserPort" -Value 65534 -Type DWord -Force
           Set-ItemProperty -Path $tcpParams -Name "TcpTimedWaitDelay" -Value 30 -Type DWord -Force
@@ -203,35 +200,35 @@ jobs:
           netsh int ipv4 set dynamicport tcp start=1025 num=64511 | Out-Null
           netsh int ipv4 set dynamicport udp start=1025 num=64511 | Out-Null
 
-          # 6. Disable NetBIOS over TCP/IP
+          # NetBIOS Demolition
           Get-WmiObject -Class Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true } | ForEach-Object {
               $_.SetTcpipNetbios(2) | Out-Null
           }
 
-          # 7. Demolish IPv6 Transition Tunnels
+          # IPv6 Transition Tech Demolition
           netsh interface teredo set state disabled | Out-Null
           netsh interface 6to4 set state disabled | Out-Null
           netsh interface isatap set state disabled | Out-Null
 
-          # 8. Disable NIC Power Management
+          # Disable Adapter Power Management
           Get-NetAdapter | ForEach-Object {
               Disable-NetAdapterPowerManagement -Name $_.Name -ErrorAction SilentlyContinue
           }
 
-          # 9. Interface Tuning (TCPNoDelay & TcpAckFrequency)
+          # TCP Low-Latency Interface Properties
           $interfaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
           foreach ($iface in $interfaces) {
               Set-ItemProperty -Path $iface.PSPath -Name "TcpAckFrequency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
               Set-ItemProperty -Path $iface.PSPath -Name "TCPNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           }
 
-          # ── Bloat Services Elimination ──
+          # Stop Bloat Services
           foreach ($svc in 'WSearch','DiagTrack','DoSvc','Spooler','SysMain','PcaSvc','WerSvc') {
               Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
               Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
           }
 
-          # ── RDP Optimization & High FPS Pipeline ──
+          # High-Precision Timer & Terminal Services
           $TimerCode = 'using System; using System.Runtime.InteropServices; public class TimerRes { [DllImport("ntdll.dll", SetLastError = true)] public static extern int NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution); }'
           Add-Type -TypeDefinition $TimerCode
           [TimerRes]::NtSetTimerResolution(5000, $true, [ref]0) | Out-Null
@@ -248,13 +245,13 @@ jobs:
           Set-ItemProperty -Path $tsPolicies -Name "KeepAliveEnable" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPolicies -Name "KeepAliveInterval" -Value 1 -Type DWord -Force
 
-          # Disable Unused RDP Subsystems
+          # Disable Overhead RDP Channels
           Set-ItemProperty -Path $tsPolicies -Name "fDisableCpm" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPolicies -Name "fDisableCdm" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPolicies -Name "fDisableLPT" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPolicies -Name "fDisableAudioCapture" -Value 1 -Type DWord -Force
 
-          # DWM & Multimedia Unthrottled Engine
+          # DWM 60fps Pipeline
           $dwm = "HKLM:\SOFTWARE\Microsoft\Windows\Dwm"
           Set-ItemProperty -Path $dwm -Name "DWMFRAMEINTERVAL" -Value 15 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $dwm -Name "OverlayTestMode" -Value 5 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -262,24 +259,24 @@ jobs:
           Set-ItemProperty -Path $mmProfile -Name "NetworkThrottlingIndex" -Value 0xFFFFFFFF -Type DWord -Force
           Set-ItemProperty -Path $mmProfile -Name "SystemResponsiveness" -Value 0 -Type DWord -Force
 
-          # ── User Account Provisioning ──
+          # User Provisioning
           if (-not $env:RDP_PASS) { Write-Error "CRITICAL: RDP_PASSWORD secret is missing."; exit 1 }
           $secPass = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USER -Password $secPass -Description "Fabric RDP User" -AccountNeverExpires -ErrorAction SilentlyContinue | Out-Null
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USER -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USER -ErrorAction SilentlyContinue
 
-          # ── Enable Terminal Server & Firewall Rules ──
+          # Enable RDP Listener & Firewall
           $tsCtrl = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
           Set-ItemProperty -Path $tsCtrl -Name "fDenyTSConnections" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           New-NetFirewallRule -DisplayName "Tailscale-In-UDP" -Direction Inbound -Protocol UDP -LocalPort 41641 -Action Allow -ErrorAction SilentlyContinue | Out-Null
           New-NetFirewallRule -DisplayName "MS-Cloud-Diagnostics" -Direction Outbound -Protocol TCP -RemotePort 80,443,8080 -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
-          Write-Host "✅ OS Layer Optimized. Silverbullet & MS Stack Ready." -ForegroundColor Green
+          Write-Host "OS Layer Optimized. Silverbullet & MS Stack Ready." -ForegroundColor Green
 
       # ── 2. TAILSCALE MESH INJECTION & DISK HYGIENE ─────────────────────
-      - name: "🌐 Phase 2: Tailscale Ephemeral Mesh & Cache Cleanup"
+      - name: "Phase 2: Tailscale Ephemeral Mesh & Cache Cleanup"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
@@ -288,7 +285,7 @@ jobs:
           $installer = $env:TS_MSI
           $job = Get-Job -Id ([int]$env:TS_DL_JOB) -ErrorAction SilentlyContinue
           if ($job) {
-              Write-Host "⏳ Waiting for background Tailscale download..." -ForegroundColor DarkCyan
+              Write-Host "Waiting for background Tailscale download..." -ForegroundColor DarkCyan
               $job | Wait-Job -Timeout 120 | Out-Null
               $rc = Receive-Job $job
               Remove-Job $job -Force
@@ -302,13 +299,12 @@ jobs:
               }
               if (-not $success) { Write-Error "Failed to download Tailscale."; exit 1 }
           }
-          Write-Host "📦 Installing Tailscale..." -ForegroundColor Cyan
+          Write-Host "Installing Tailscale..." -ForegroundColor Cyan
 
           Start-Process msiexec.exe -ArgumentList "/i", $installer, "/quiet", "/norestart" -Wait
           $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsPath)) { Write-Error "Tailscale installation failed."; exit 1 }
 
-          # Evict MSI immediately to free disk space
           if (Test-Path $installer) { Remove-Item -Path $installer -Force -ErrorAction SilentlyContinue }
 
           $hostname = "fabric-node-${env:RUN_ID}-${env:MATRIX_ID}"
@@ -332,10 +328,10 @@ jobs:
           "TS_DIRECT=$($tsStatus -notmatch 'relay')" | Out-File -Append $env:GITHUB_ENV
 
       # ── 2.5. DYNAMIC CHROME AUTOMATION ────────────────────────────────
-      - name: "🧩 Phase 2.5: Dynamic Chrome Bootstrap & Bookmarks"
+      - name: "Phase 2.5: Dynamic Chrome Bootstrap & Bookmarks"
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "🧩 Setting up Dynamic Chrome Bootstrap..." -ForegroundColor Cyan
+          Write-Host "Setting up Dynamic Chrome Bootstrap..." -ForegroundColor Cyan
 
           $startupUrl = "https://fabric-x-xi.vercel.app/"
           $fabricRoot = $env:FABRIC_ROOT
@@ -378,7 +374,7 @@ jobs:
           `$shortcut.Save()
 
           Start-Process -FilePath `$chromePath -ArgumentList `$launchArgs
-"@
+          "@
           Set-Content -Path $bootstrapPath -Value $bootstrapScript -Encoding UTF8
 
           $taskName = "RDPFabric-ChromeBootstrap"
@@ -391,7 +387,7 @@ jobs:
 
           Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
 
-          # Chrome policies & managed bookmarks
+          # Registry Policies
           $chromePolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
           New-Item -Path $chromePolicyPath -Force | Out-Null
 
@@ -403,19 +399,19 @@ jobs:
           $startupUrlsJson = "[`"$startupUrl`"]"
           New-ItemProperty -Path $chromePolicyPath -Name "StartupUrls" -PropertyType String -Value $startupUrlsJson -Force | Out-Null
 
-          # Fix permissions
+          # Permissions
           $acl = Get-Acl $fabricRoot
           $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\$env:RDP_USER", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
           $acl.AddAccessRule($rule)
           Set-Acl -Path $fabricRoot -AclObject $acl
 
-          Write-Host "✅ Chrome Automation Configured." -ForegroundColor Green
+          Write-Host "Chrome Automation Configured." -ForegroundColor Green
 
       # ── 2.6. FLOATING COUNTDOWN OVERLAY (DESKTOP GUARDED) ─────────────
-      - name: "⏱️ Phase 2.6: Floating Timer Overlay (Desktop-Guarded)"
+      - name: "Phase 2.6: Floating Timer Overlay (Desktop-Guarded)"
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "⏱️ Installing floating countdown overlay..." -ForegroundColor Cyan
+          Write-Host "Installing floating countdown overlay..." -ForegroundColor Cyan
 
           $fabricRoot = $env:FABRIC_ROOT
           New-Item -ItemType Directory -Path $fabricRoot -Force | Out-Null
@@ -425,7 +421,6 @@ jobs:
           $timerScript = @'
           $ErrorActionPreference = 'SilentlyContinue'
 
-          # Interactive Session Guard: Wait for Explorer desktop handle
           while (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
               Start-Sleep -Seconds 1
           }
@@ -531,13 +526,13 @@ jobs:
 
           [System.Windows.Forms.Application]::EnableVisualStyles()
           [System.Windows.Forms.Application]::Run($form)
-'@
+          '@
           Set-Content -Path $timerPath -Value $timerScript -Encoding UTF8
 
           $vbs = @"
           Set sh = CreateObject("WScript.Shell")
           sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$timerPath""", 0, False
-"@
+          "@
           Set-Content -Path $timerLauncher -Value $vbs -Encoding ASCII
 
           $timerTaskName = "RDPFabric-Timer"
@@ -555,21 +550,21 @@ jobs:
               Copy-Item -Path $timerLauncher -Destination (Join-Path $startupDir "FabricTimer.vbs") -Force -ErrorAction SilentlyContinue
           }
 
-          Write-Host "✅ Overlay Armed." -ForegroundColor Green
+          Write-Host "Overlay Armed." -ForegroundColor Green
 
       # ── 2.7. WORKSTATION MODE & DEFENDER LOCK ─────────────────────────
-      - name: "🛡️ Phase 2.7: Workstation Mode & Security Bypass"
+      - name: "Phase 2.7: Workstation Mode & Security Bypass"
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "🛡️ Configuring Workstation Mode..." -ForegroundColor Cyan
+          Write-Host "Configuring Workstation Mode..." -ForegroundColor Cyan
 
-          # 1. Total UAC Demolition
+          # UAC Demolition
           $uacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
           Set-ItemProperty -Path $uacPath -Name "EnableLUA" -Value 0 -Type DWord -Force
           Set-ItemProperty -Path $uacPath -Name "ConsentPromptBehaviorAdmin" -Value 0 -Type DWord -Force
           Set-ItemProperty -Path $uacPath -Name "PromptOnSecureDesktop" -Value 0 -Type DWord -Force
 
-          # 2. SmartScreen Demolition
+          # SmartScreen Demolition
           $smartScreenPolicies = @(
               "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System",
               "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer"
@@ -580,7 +575,7 @@ jobs:
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 0 -Type DWord -Force
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "SmartScreenEnabled" -Value "Off" -Type String -Force
 
-          # 3. Mark-of-the-Web (MOTW) Bypass
+          # Mark-of-the-Web (MOTW) Bypass
           $attachPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Attachments"
           if (-not (Test-Path $attachPath)) { New-Item -Path $attachPath -Force | Out-Null }
           Set-ItemProperty -Path $attachPath -Name "SaveZoneInformation" -Value 1 -Type DWord -Force
@@ -590,7 +585,7 @@ jobs:
           if (-not (Test-Path $attachLMPath)) { New-Item -Path $attachLMPath -Force | Out-Null }
           Set-ItemProperty -Path $attachLMPath -Name "ScanWithAntiVirus" -Value 1 -Type DWord -Force
 
-          # 4. Lockdown Defender Permanent Neutralization
+          # Defender Permanent Lock
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableBehaviorMonitoring $true -Force -ErrorAction SilentlyContinue
           $defFeatures = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
           if (-not (Test-Path $defFeatures)) { New-Item -Path $defFeatures -Force | Out-Null }
@@ -599,10 +594,10 @@ jobs:
           if (-not (Test-Path $defKey)) { New-Item -Path $defKey -Force | Out-Null }
           Set-ItemProperty -Path $defKey -Name "DisableAntiSpyware" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
 
-          # 5. Global Script Execution Unrestricted
+          # Unrestricted Script Execution
           Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -ErrorAction SilentlyContinue
 
-          # 6. User Profile Responsiveness Tweaks
+          # User Profile Tweaks
           $fabricRoot = $env:FABRIC_ROOT
           $hkcuTweaks = @'
           $ErrorActionPreference = 'SilentlyContinue'
@@ -612,7 +607,7 @@ jobs:
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarAnimations' -Value 0 -Type DWord
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Value 2 -Type DWord
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' -Value 2 -Type DWord
-'@
+          '@
           $hkcuPath = Join-Path $fabricRoot "UserTweaks.ps1"
           Set-Content -Path $hkcuPath -Value $hkcuTweaks -Encoding UTF8
           $taskUser = "$env:COMPUTERNAME\$env:RDP_USER"
@@ -623,16 +618,16 @@ jobs:
           $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
           Register-ScheduledTask -TaskName "RDPFabric-UserTweaks" -Action $tweakAction -Trigger $tweakTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
 
-          Write-Host "✅ Workstation Mode Active." -ForegroundColor Green
+          Write-Host "Workstation Mode Active." -ForegroundColor Green
 
       # ── 3. TELEMETRY & NOTIFICATION ────────────────────────────────────
-      - name: "📡 Phase 3: Telemetry Dispatch"
+      - name: "Phase 3: Telemetry Dispatch"
         run: |
           if ($env:TG_TOKEN -and $env:TG_CHAT) {
               $link = if ($env:TS_DIRECT -eq 'True') { "direct" } else { "relay" }
-              $msg = "⚡ <b>Fabric Node Online</b>`n`n🖥 <b>Host:</b> <code>$env:TS_HOSTNAME</code>`n🌐 <b>IP:</b> <code>$env:TS_IP</code>`n🔗 <b>Path:</b> <code>$link</code>`n👤 <b>User:</b> <code>$env:RDP_USER</code>`n⏳ <b>Duration:</b> <code>$env:SESSION_MINUTES</code> min`n⏱ <b>Overlay:</b> active"
+              $msg = "Fabric Node Online`n`nHost: $env:TS_HOSTNAME`nIP: $env:TS_IP`nPath: $link`nUser: $env:RDP_USER`nDuration: $env:SESSION_MINUTES min`nOverlay: active"
               $uri = "https://api.telegram.org/bot$($env:TG_TOKEN)/sendMessage"
-              Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg; parse_mode="HTML"} -ErrorAction SilentlyContinue | Out-Null
+              Invoke-RestMethod -Uri $uri -Method Post -Body @{chat_id=$env:TG_CHAT; text=$msg} -ErrorAction SilentlyContinue | Out-Null
           } else {
               Write-Host "=========================================="
               Write-Host " CONNECT VIA RDP"
@@ -642,13 +637,13 @@ jobs:
           }
 
       # ── 4. SUSTAIN & CYCLE HANDOFF ─────────────────────────────────────
-      - name: "⏳ Phase 4: Session Hold & Cycle Handoff"
+      - name: "Phase 4: Session Hold & Cycle Handoff"
         env:
           GH_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
         run: |
           $ErrorActionPreference = 'Continue'
           $minutes = [int]$env:SESSION_MINUTES
-          Write-Host "🛡️ Holding session for $minutes minutes..." -ForegroundColor Cyan
+          Write-Host "Holding session for $minutes minutes..." -ForegroundColor Cyan
 
           $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
           $start = Get-Date
@@ -657,11 +652,11 @@ jobs:
               Start-Sleep -Seconds 60
               $remaining = [math]::Max(0, [math]::Round($minutes - (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes, 1))
 
-              # Multi-Layer Watchdog: Tailscale Service & CLI Status
+              # Tailscale Service & Status Watchdog
               $tsOk = $false
               $svc = Get-Service -Name "IPNService" -ErrorAction SilentlyContinue
               if ($svc -and $svc.Status -ne 'Running') {
-                  Write-Host "⚠️ Tailscale IPNService stopped — restarting..." -ForegroundColor Yellow
+                  Write-Host "Tailscale IPNService stopped — restarting..." -ForegroundColor Yellow
                   Start-Service -Name "IPNService" -ErrorAction SilentlyContinue
                   Start-Sleep -Seconds 2
               }
@@ -670,15 +665,15 @@ jobs:
                   $backend = (& $tsPath status --json 2>$null | ConvertFrom-Json).BackendState
                   $tsOk = ($backend -eq 'Running')
                   if (-not $tsOk) {
-                      Write-Host "⚠️ Tailscale backend '$backend' — re-upping..." -ForegroundColor Yellow
+                      Write-Host "Tailscale backend '$backend' — re-upping..." -ForegroundColor Yellow
                       & $tsPath up --authkey="$env:TS_AUTHKEY" --hostname="$env:TS_HOSTNAME" --accept-routes=false --unattended 2>$null | Out-Null
                   }
               }
 
-              # Watchdog: RDP Port 3389 Listener Verification
+              # RDP Listener Watchdog
               $rdpOk = [bool](Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue)
               if (-not $rdpOk) {
-                  Write-Host "⚠️ RDP listener down — restarting TermService..." -ForegroundColor Yellow
+                  Write-Host "RDP listener down — restarting TermService..." -ForegroundColor Yellow
                   Restart-Service TermService -Force -ErrorAction SilentlyContinue
               }
 
@@ -688,9 +683,8 @@ jobs:
           $cycles = [int]"${{ inputs.cycles }}"
           if ($cycles -gt 0) {
               $next = $cycles - 1
-              Write-Host "🔄 Initiating Cycle Handoff (Remaining: $next)..." -ForegroundColor Yellow
+              Write-Host "Initiating Cycle Handoff (Remaining: $next)..." -ForegroundColor Yellow
 
-              # Dynamic target resolution via workflow file path
               $workflowTarget = if ($env:GITHUB_WORKFLOW_REF) {
                   $env:GITHUB_WORKFLOW_REF.Split('@')[0].Split('/')[-1]
               } else {
@@ -708,25 +702,25 @@ jobs:
 
                   if ($LASTEXITCODE -eq 0) {
                       $dispatched = $true
-                      Write-Host "✅ Handoff successfully dispatched (attempt $attempt)!" -ForegroundColor Green
+                      Write-Host "Handoff successfully dispatched (attempt $attempt)!" -ForegroundColor Green
                   } else {
-                      Write-Host "⚠️ Handoff attempt $attempt failed — retrying in 15s..." -ForegroundColor Yellow
+                      Write-Host "Handoff attempt $attempt failed — retrying in 15s..." -ForegroundColor Yellow
                       Start-Sleep -Seconds 15
                   }
               }
-              if (-not $dispatched) { Write-Error "❌ Handoff failed after 3 attempts." }
+              if (-not $dispatched) { Write-Error "Handoff failed after 3 attempts." }
           } else {
-              Write-Host "🛑 No cycles remaining. Shutting down gracefully."
+              Write-Host "No cycles remaining. Shutting down gracefully."
           }
 
       # ── 5. TEARDOWN ───────────────────────────────────────────────────
-      - name: "🧹 Phase 5: Ephemeral Teardown"
+      - name: "Phase 5: Ephemeral Teardown"
         if: always()
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
           $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
           if (Test-Path $tsPath) {
-              Write-Host "🧹 Logging out of Tailnet (ephemeral node auto-purges)..."
+              Write-Host "Logging out of Tailnet (ephemeral node auto-purges)..."
               & $tsPath logout 2>$null | Out-Null
           }
 
@@ -735,10 +729,10 @@ jobs:
           }
           Get-Process -Name 'chrome','powershell','wscript' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-          Write-Host "⏳ Waiting 3 seconds for Windows kernel file-lock release..."
+          Write-Host "Waiting 3 seconds for Windows kernel file-lock release..."
           Start-Sleep -Seconds 3
 
           if (Test-Path $env:FABRIC_ROOT) {
               Remove-Item -Path $env:FABRIC_ROOT -Recurse -Force -ErrorAction SilentlyContinue
           }
-          Write-Host "✅ Teardown complete."
+          Write-Host "Teardown complete."
