@@ -1,6 +1,3 @@
-# main.yml
-
-```yaml
 name: RDP Fabric - Tailscale
 
 "on":
@@ -30,7 +27,7 @@ name: RDP Fabric - Tailscale
         type: string
 
       quick_test:
-        description: "Run a 5-minute smoke test"
+        description: "Run 5-minute test"
         required: true
         default: false
         type: boolean
@@ -45,15 +42,15 @@ defaults:
 jobs:
 
   orchestrate:
-    name: Generate Runner Matrix
+    name: Create Runner Matrix
     runs-on: ubuntu-latest
 
     outputs:
-      matrix: ${{ steps.generate.outputs.matrix }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
 
     steps:
       - name: Generate Matrix
-        id: generate
+        id: matrix
         shell: bash
         run: |
           set -euo pipefail
@@ -64,26 +61,24 @@ jobs:
             1|2|3|4|5|6|7|8|9|10)
               ;;
             *)
-              echo "Invalid instance_count: $COUNT"
+              echo "Invalid instance count."
               exit 1
               ;;
           esac
 
-          MATRIX="$(seq 1 "$COUNT" | jq -R . | jq -s -c '{id: .}')"
+          MATRIX=$(seq 1 "$COUNT" | jq -R . | jq -s -c '{id: .}')
 
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
           echo "======================================"
           echo "RDP FABRIC"
           echo "Instances: $COUNT"
-          echo "Matrix:   $MATRIX"
           echo "======================================"
 
   fabric:
     name: RDP Node ${{ matrix.id }}
 
-    needs:
-      - orchestrate
+    needs: orchestrate
 
     runs-on: windows-latest
 
@@ -95,8 +90,8 @@ jobs:
     timeout-minutes: 360
 
     env:
-      TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-      RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
       RDP_USER: FabricAdmin
 
@@ -108,37 +103,29 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------------
-      # CHECKOUT
-      # --------------------------------------------------------
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------------
-      # VALIDATION
-      # --------------------------------------------------------
-
-      - name: Validate Environment
+      - name: Validate Configuration
         run: |
           $ErrorActionPreference = "Stop"
 
           Write-Host "======================================"
-          Write-Host " ENVIRONMENT VALIDATION"
+          Write-Host " CONFIGURATION"
           Write-Host "======================================"
 
-          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-              throw "Missing GitHub secret: TAILSCALE_AUTH_KEY"
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+              throw "TAILSCALE_AUTH_KEY secret is missing."
           }
 
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASS)) {
-              throw "Missing GitHub secret: RDP_PASSWORD"
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+              throw "RDP_PASSWORD secret is missing."
           }
 
           $script = Join-Path $PWD "scripts\fabric-engine.ps1"
 
           if (-not (Test-Path $script)) {
-              throw "Missing script: $script"
+              throw "fabric-engine.ps1 not found."
           }
 
           $runtime = 0
@@ -147,38 +134,25 @@ jobs:
               $env:RUNTIME_MINUTES,
               [ref]$runtime
           )) {
-              throw "runtime_minutes must be a whole number."
+              throw "Runtime must be numeric."
           }
 
           if ($env:QUICK_TEST -eq "true") {
               $runtime = 5
           }
 
-          if ($runtime -lt 1) {
-              throw "Runtime must be at least 1 minute."
+          if ($runtime -lt 1 -or $runtime -gt 345) {
+              throw "Runtime must be between 1 and 345 minutes."
           }
 
-          if ($runtime -gt 345) {
-              throw "Runtime cannot exceed 345 minutes."
-          }
+          Write-Host "Node:    $env:MATRIX_ID"
+          Write-Host "Run:     $env:RUN_ID"
+          Write-Host "Runtime: $runtime minutes"
+          Write-Host "Status:  OK"
 
-          Write-Host "Node:     $env:MATRIX_ID"
-          Write-Host "Run ID:   $env:RUN_ID"
-          Write-Host "Runtime:  $runtime minutes"
-          Write-Host "Script:   $script"
-          Write-Host "Status:   OK"
-
-      # --------------------------------------------------------
-      # SETUP
-      # --------------------------------------------------------
-
-      - name: Setup Fabric
+      - name: Phase 1 - Fabric Setup
         run: |
           $ErrorActionPreference = "Stop"
-
-          Write-Host "======================================"
-          Write-Host " FABRIC SETUP"
-          Write-Host "======================================"
 
           & "$PWD\scripts\fabric-engine.ps1" -Phase Setup
 
@@ -186,97 +160,73 @@ jobs:
               throw "Fabric setup failed."
           }
 
-      # --------------------------------------------------------
-      # NETWORK HEALTH
-      # --------------------------------------------------------
-
-      - name: Network Health Check
+      - name: Phase 2 - Network Diagnostics
         run: |
           $ErrorActionPreference = "Continue"
 
           Write-Host "======================================"
-          Write-Host " NETWORK HEALTH"
+          Write-Host " NETWORK DIAGNOSTICS"
           Write-Host "======================================"
 
-          Write-Host ""
-          Write-Host "--- TCP Global ---"
-          netsh interface tcp show global
-
-          Write-Host ""
-          Write-Host "--- IP Configuration ---"
+          Write-Host "`n--- IP Configuration ---"
           Get-NetIPConfiguration |
               Format-Table -AutoSize
 
-          Write-Host ""
-          Write-Host "--- DNS ---"
+          Write-Host "`n--- DNS ---"
           Get-DnsClientServerAddress |
               Format-Table -AutoSize
 
-          Write-Host ""
-          Write-Host "--- HTTPS Test ---"
+          Write-Host "`n--- TCP ---"
+          netsh interface tcp show global
 
-          try {
-              $test = Test-NetConnection `
-                  -ComputerName "1.1.1.1" `
-                  -Port 443 `
-                  -WarningAction SilentlyContinue
+          Write-Host "`n--- HTTPS Connectivity ---"
 
-              if ($test.TcpTestSucceeded) {
-                  Write-Host "HTTPS connectivity: OK" -ForegroundColor Green
-              }
-              else {
-                  Write-Warning "HTTPS connectivity test failed."
-              }
+          $test = Test-NetConnection `
+              -ComputerName "1.1.1.1" `
+              -Port 443 `
+              -WarningAction SilentlyContinue
+
+          if ($test.TcpTestSucceeded) {
+              Write-Host "HTTPS: OK" -ForegroundColor Green
           }
-          catch {
-              Write-Warning "Network test failed: $($_.Exception.Message)"
+          else {
+              Write-Warning "HTTPS connectivity failed."
           }
 
-      # --------------------------------------------------------
-      # TAILSCALE
-      # --------------------------------------------------------
-
-      - name: Tailscale Health
+      - name: Phase 3 - Tailscale Diagnostics
         run: |
           $ErrorActionPreference = "Stop"
 
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
 
           if (-not (Test-Path $ts)) {
-              throw "Tailscale executable not found."
+              throw "Tailscale is not installed."
           }
 
           Write-Host "======================================"
-          Write-Host " TAILSCALE HEALTH"
+          Write-Host " TAILSCALE"
           Write-Host "======================================"
 
           $ip = (& $ts ip -4 2>$null | Out-String).Trim()
 
-          if ([string]::IsNullOrWhiteSpace($ip)) {
-              throw "Tailscale IPv4 address was not found."
+          if (-not $ip) {
+              throw "Tailscale IPv4 address unavailable."
           }
 
-          Write-Host "Tailscale IPv4: $ip"
-
-          Write-Host ""
-          Write-Host "--- Tailscale Status ---"
+          Write-Host "Tailscale IP: $ip"
 
           & $ts status
 
           if ($LASTEXITCODE -ne 0) {
-              throw "Tailscale status command failed."
+              throw "Tailscale status failed."
           }
 
-      # --------------------------------------------------------
-      # RDP
-      # --------------------------------------------------------
-
-      - name: RDP Health
+      - name: Phase 4 - RDP Diagnostics
         run: |
           $ErrorActionPreference = "Continue"
 
           Write-Host "======================================"
-          Write-Host " RDP HEALTH"
+          Write-Host " RDP"
           Write-Host "======================================"
 
           $service = Get-Service `
@@ -284,18 +234,11 @@ jobs:
               -ErrorAction SilentlyContinue
 
           if (-not $service) {
-              throw "TermService does not exist."
+              throw "TermService not found."
           }
 
-          Write-Host "TermService: $($service.Status)"
-
           if ($service.Status -ne "Running") {
-              Write-Host "Starting TermService..."
-
-              Start-Service `
-                  -Name "TermService" `
-                  -ErrorAction SilentlyContinue
-
+              Start-Service TermService
               Start-Sleep -Seconds 3
           }
 
@@ -305,61 +248,28 @@ jobs:
               -ErrorAction SilentlyContinue
 
           if ($listener) {
-              Write-Host "RDP 3389 listener: ONLINE" -ForegroundColor Green
+              Write-Host "RDP listener: ONLINE" -ForegroundColor Green
           }
           else {
-              Write-Warning "RDP 3389 listener not detected."
+              Write-Warning "RDP listener not detected."
           }
 
-      # --------------------------------------------------------
-      # WATCHDOG
-      # --------------------------------------------------------
-
-      - name: Session Watchdog
+      - name: Phase 5 - Session Watchdog
         run: |
-          $ErrorActionPreference = "Continue"
-
-          Write-Host "======================================"
-          Write-Host " SESSION WATCHDOG"
-          Write-Host "======================================"
-
           & "$PWD\scripts\fabric-engine.ps1" -Phase Watchdog
 
-          if ($LASTEXITCODE -ne 0) {
-              Write-Warning "Watchdog returned exit code $LASTEXITCODE."
-          }
-
-      # --------------------------------------------------------
-      # TEARDOWN
-      # --------------------------------------------------------
-
-      - name: Teardown
+      - name: Phase 6 - Teardown
         if: always()
         run: |
           $ErrorActionPreference = "Continue"
 
-          Write-Host "======================================"
-          Write-Host " TEARDOWN"
-          Write-Host "======================================"
-
-          $script = Join-Path $PWD "scripts\fabric-engine.ps1"
-
-          if (Test-Path $script) {
-              & $script -Phase Teardown
-          }
-
-      # --------------------------------------------------------
-      # FINAL STATUS
-      # --------------------------------------------------------
+          & "$PWD\scripts\fabric-engine.ps1" -Phase Teardown
 
       - name: Final Status
         if: always()
         run: |
-          Write-Host ""
           Write-Host "======================================"
-          Write-Host " FABRIC NODE COMPLETE"
+          Write-Host " NODE COMPLETE"
           Write-Host "======================================"
           Write-Host "Node: $env:MATRIX_ID"
           Write-Host "Run:  $env:RUN_ID"
-          Write-Host "======================================"
-```
