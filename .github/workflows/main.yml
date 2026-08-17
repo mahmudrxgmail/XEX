@@ -463,7 +463,15 @@ jobs:
 
           # ── Enable RDP & UDP Transport ──
           $tsCtrl = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
-          Set-ItemProperty -Path $tsCtrl -Name "fDenyTSConnections" -Value 0 -Force
+
+          # Each GitHub Actions `run:` block is a separate PowerShell process.
+          # Re-create the policy path here instead of relying on Phase 1a/1b variables.
+          $tsPolicies = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (-not (Test-Path -LiteralPath $tsPolicies)) {
+              New-Item -Path $tsPolicies -Force | Out-Null
+          }
+
+          Set-ItemProperty -Path $tsCtrl -Name "fDenyTSConnections" -Value 0 -Type DWord -Force
           Set-ItemProperty -Path $tsPolicies -Name "fClientDisableUDP" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
 
